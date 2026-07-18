@@ -1,12 +1,20 @@
 import { Queue } from "bullmq";
 import { Redis } from "ioredis";
 import { env } from "./config.js";
+import { logger } from "./logger.js";
+
+function logRedisError(connection: string, error: unknown) {
+  logger.error({ err: error, connection }, "Redis connection error");
+}
+
 export const redis = new Redis(env.REDIS_URL, {
   maxRetriesPerRequest: 1,
   enableReadyCheck: true,
   connectTimeout: 3000,
   commandTimeout: 5000,
 });
+redis.on("error", (error) => logRedisError("queue", error));
+
 export const cacheRedis = new Redis(env.REDIS_URL, {
   maxRetriesPerRequest: 1,
   enableReadyCheck: true,
@@ -14,6 +22,8 @@ export const cacheRedis = new Redis(env.REDIS_URL, {
   commandTimeout: 3000,
   lazyConnect: true,
 });
+cacheRedis.on("error", (error) => logRedisError("cache", error));
+
 export const inboundQueue = new Queue<{ eventId: string }, void, "process">(
   "inbound-messages",
   {
@@ -26,6 +36,10 @@ export const inboundQueue = new Queue<{ eventId: string }, void, "process">(
     },
   },
 );
+inboundQueue.on("error", (error) =>
+  logger.error({ err: error, queue: "inbound-messages" }, "queue error"),
+);
+
 export const whatsappOutboundQueue = new Queue<
   { messageId: string; channelId: string; jid: string; text: string },
   void,
@@ -39,6 +53,10 @@ export const whatsappOutboundQueue = new Queue<
     removeOnFail: { age: 604800 },
   },
 });
+whatsappOutboundQueue.on("error", (error) =>
+  logger.error({ err: error, queue: "whatsapp-outbound" }, "queue error"),
+);
+
 export async function enqueueInbound(eventId: string, force = false) {
   if (force) {
     const old = await inboundQueue.getJob(eventId);
