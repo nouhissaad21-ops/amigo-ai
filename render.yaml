@@ -15,7 +15,6 @@ services:
     dockerContext: .
     healthCheckPath: /health/live
     autoDeployTrigger: commit
-    maxShutdownDelaySeconds: 30
     envVars:
       - key: NODE_ENV
         value: production
