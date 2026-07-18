@@ -20,6 +20,11 @@ enum StoreRole {
   VIEWER
 }
 
+enum PlatformRole {
+  USER
+  SUPER_ADMIN
+}
+
 enum SubscriptionPlan {
   TRIAL
   STARTER
@@ -165,10 +170,13 @@ model User {
   passwordHash  String
   fullName      String
   status        UserStatus        @default(ACTIVE)
+  platformRole  PlatformRole      @default(USER)
   createdAt     DateTime          @default(now())
   updatedAt     DateTime          @updatedAt
   memberships   StoreMembership[]
   refreshTokens RefreshSession[]
+
+  @@index([platformRole, status])
 }
 
 model StoreMembership {
