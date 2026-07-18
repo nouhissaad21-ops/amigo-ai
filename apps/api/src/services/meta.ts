@@ -7,7 +7,6 @@ type Page = {
   id: string;
   name: string;
   access_token: string;
-  instagram_business_account?: { id: string; username?: string };
 };
 function metaCredentials() {
   if (!env.META_APP_ID || !env.META_APP_SECRET)
@@ -95,8 +94,6 @@ export function metaOAuthUrl(state: string) {
       "pages_show_list",
       "pages_manage_metadata",
       "pages_messaging",
-      "instagram_basic",
-      "instagram_manage_messages",
     ].join(","),
   );
   return u.toString();
@@ -124,7 +121,7 @@ export async function completeMetaOAuth(storeId: string, code: string) {
   if (!lr.ok || !ld.access_token)
     throw new AppError(400, "META_LONG_TOKEN_FAILED", "فشل Long-lived token");
   const pages = await graph<{ data: Page[] }>(
-    `me/accounts?fields=${encodeURIComponent("id,name,access_token,instagram_business_account{id,username}")}&limit=100`,
+    `me/accounts?fields=${encodeURIComponent("id,name,access_token")}&limit=100`,
     ld.access_token,
   );
   let facebook = 0,
@@ -154,33 +151,6 @@ export async function completeMetaOAuth(storeId: string, code: string) {
       });
     }
     facebook++;
-    if (p.instagram_business_account) {
-      const ig = await save({
-        storeId,
-        type: "INSTAGRAM",
-        externalAccountId: p.instagram_business_account.id,
-        externalBusinessId: p.id,
-        name: p.instagram_business_account.username ?? `${p.name} Instagram`,
-        accessToken: p.access_token,
-      });
-      try {
-        await subscribe(
-          ig.externalAccountId,
-          p.access_token,
-          "messages,messaging_postbacks",
-        );
-        await systemDb.channel.update({
-          where: { id: ig.id },
-          data: { webhookSubscribedAt: new Date() },
-        });
-      } catch (e) {
-        await systemDb.channel.update({
-          where: { id: ig.id },
-          data: { status: "ERROR", lastError: (e as Error).message },
-        });
-      }
-      instagram++;
-    }
   }
   return { facebook, instagram };
 }
