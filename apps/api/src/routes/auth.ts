@@ -8,6 +8,10 @@ import {
 } from "../auth.js";
 import { systemDb } from "../db.js";
 import { AppError } from "../errors.js";
+import {
+  ensureInitialPlatformAdmin,
+  initialPlatformRole,
+} from "../platform-admin.js";
 import { loginSchema, registerSchema } from "../schemas.js";
 import { redisRateLimit } from "../rate-limit.js";
 import { randomToken, sha256 } from "../security.js";
@@ -48,73 +52,100 @@ async function session(userId: string, storeId: string, req: any) {
   return t;
 }
 authRouter.post("/register", limiter, async (req, res) => {
-  const i = registerSchema.parse(req.body),
-    hash = await argon2.hash(i.password, passwordOptions),
-    r = await systemDb.$transaction(async (tx) => {
-      const user = await tx.user.create({
-          data: { email: i.email, fullName: i.fullName, passwordHash: hash },
-        }),
-        store = await tx.store.create({
-          data: { name: i.storeName, slug: slug(i.storeName) },
-        }),
-        membership = await tx.storeMembership.create({
-          data: { storeId: store.id, userId: user.id, role: "OWNER" },
-        });
-      await tx.subscription.create({
-        data: {
-          storeId: store.id,
-          currentPeriodEnd: new Date(Date.now() + 1209600000),
-        },
-      });
-      await tx.merchantRules.create({
-        data: { storeId: store.id, generalRules: "" },
-      });
-      return { user, store, membership };
+  const input = registerSchema.parse(req.body);
+  const passwordHash = await argon2.hash(input.password, passwordOptions);
+  const result = await systemDb.$transaction(async (tx) => {
+    const platformRole = await initialPlatformRole(tx);
+    const user = await tx.user.create({
+      data: {
+        email: input.email,
+        fullName: input.fullName,
+        passwordHash,
+        platformRole,
+      },
+    });
+    const store = await tx.store.create({
+      data: { name: input.storeName, slug: slug(input.storeName) },
+    });
+    const membership = await tx.storeMembership.create({
+      data: { storeId: store.id, userId: user.id, role: "OWNER" },
+    });
+    await tx.subscription.create({
+      data: {
+        storeId: store.id,
+        currentPeriodEnd: new Date(Date.now() + 1209600000),
+      },
+    });
+    await tx.merchantRules.create({
+      data: { storeId: store.id, generalRules: "" },
+    });
+    return { user, store, membership };
+  });
+
+  const [access, refresh] = await Promise.all([
+    signAccessToken({
+      userId: result.user.id,
+      storeId: result.store.id,
+      role: result.membership.role,
     }),
-    [access, refresh] = await Promise.all([
-      signAccessToken({
-        userId: r.user.id,
-        storeId: r.store.id,
-        role: r.membership.role,
-      }),
-      session(r.user.id, r.store.id, req),
-    ]);
+    session(result.user.id, result.store.id, req),
+  ]);
   setAuthCookies(res, access, refresh);
   res.status(201).json({
-    user: { id: r.user.id, email: r.user.email, fullName: r.user.fullName },
-    store: r.store,
+    user: {
+      id: result.user.id,
+      email: result.user.email,
+      fullName: result.user.fullName,
+      platformRole: result.user.platformRole,
+    },
+    store: result.store,
   });
 });
 authRouter.post("/login", limiter, async (req, res) => {
-  const i = loginSchema.parse(req.body),
-    u = await systemDb.user.findUnique({
-      where: { email: i.email },
-      include: {
-        memberships: {
-          include: { store: true },
-          orderBy: { createdAt: "asc" },
-        },
+  const input = loginSchema.parse(req.body);
+  const user = await systemDb.user.findUnique({
+    where: { email: input.email },
+    include: {
+      memberships: {
+        include: { store: true },
+        orderBy: { createdAt: "asc" },
       },
-    }),
-    passwordValid = u
-      ? await argon2.verify(u.passwordHash, i.password)
-      : await argon2.hash(i.password, passwordOptions).then(() => false);
-  if (!u || u.status !== "ACTIVE" || !passwordValid)
+    },
+  });
+  const passwordValid = user
+    ? await argon2.verify(user.passwordHash, input.password)
+    : await argon2.hash(input.password, passwordOptions).then(() => false);
+  if (!user || user.status !== "ACTIVE" || !passwordValid)
     throw new AppError(
       401,
       "INVALID_CREDENTIALS",
       "البريد أو كلمة السر غير صحيحة",
     );
-  const m = u.memberships.find((x) => x.store.isActive && !x.store.deletedAt);
-  if (!m) throw new AppError(403, "NO_ACTIVE_STORE", "ما كاش متجر مفعّل");
+
+  const membership = user.memberships.find(
+    (item) => item.store.isActive && !item.store.deletedAt,
+  );
+  if (!membership)
+    throw new AppError(403, "NO_ACTIVE_STORE", "ما كاش متجر مفعّل");
+
+  const platformRole = await ensureInitialPlatformAdmin(user.id);
   const [access, refresh] = await Promise.all([
-    signAccessToken({ userId: u.id, storeId: m.storeId, role: m.role }),
-    session(u.id, m.storeId, req),
+    signAccessToken({
+      userId: user.id,
+      storeId: membership.storeId,
+      role: membership.role,
+    }),
+    session(user.id, membership.storeId, req),
   ]);
   setAuthCookies(res, access, refresh);
   res.json({
-    user: { id: u.id, email: u.email, fullName: u.fullName },
-    store: m.store,
+    user: {
+      id: user.id,
+      email: user.email,
+      fullName: user.fullName,
+      platformRole,
+    },
+    store: membership.store,
   });
 });
 authRouter.post("/refresh", limiter, async (req, res) => {
@@ -180,7 +211,7 @@ authRouter.get("/me", authenticate, async (req, res) => {
     [user, store, subscription] = await Promise.all([
       systemDb.user.findUniqueOrThrow({
         where: { id: a.userId },
-        select: { id: true, email: true, fullName: true },
+        select: { id: true, email: true, fullName: true, platformRole: true },
       }),
       systemDb.store.findUniqueOrThrow({ where: { id: a.storeId } }),
       systemDb.subscription.findUnique({ where: { storeId: a.storeId } }),

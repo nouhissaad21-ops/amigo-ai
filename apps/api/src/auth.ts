@@ -1,5 +1,5 @@
 import type { NextFunction, Request, RequestHandler, Response } from "express";
-import type { StoreRole } from "@prisma/client";
+import type { PlatformRole, StoreRole } from "@prisma/client";
 import { jwtVerify, SignJWT } from "jose";
 import { env, isProduction } from "./config.js";
 import { systemDb } from "./db.js";
@@ -72,28 +72,37 @@ export const authenticate: RequestHandler = async (req, _res, next) => {
       },
       include: {
         store: { include: { subscription: true } },
-        user: { select: { status: true } },
+        user: { select: { status: true, platformRole: true } },
       },
     });
-    if (
-      !m ||
-      !m.store.isActive ||
-      m.store.deletedAt ||
-      m.user.status !== "ACTIVE"
-    )
-      throw new AppError(403, "ACCOUNT_DISABLED", "الحساب أو المتجر غير مفعّل");
-    const s = m.store.subscription;
-    if (
-      !s ||
-      !(s.status === "ACTIVE" || s.status === "TRIALING") ||
-      s.currentPeriodEnd <= new Date()
-    )
-      throw new AppError(
-        402,
-        "SUBSCRIPTION_REQUIRED",
-        "الاشتراك منتهي؛ جدده لمواصلة استعمال المنصة",
-      );
-    req.auth = { userId: payload.sub, storeId: payload.storeId, role: m.role };
+    if (!m || m.user.status !== "ACTIVE")
+      throw new AppError(403, "ACCOUNT_DISABLED", "الحساب غير مفعّل");
+
+    if (m.user.platformRole !== "SUPER_ADMIN") {
+      if (!m.store.isActive || m.store.deletedAt)
+        throw new AppError(403, "ACCOUNT_DISABLED", "المتجر غير مفعّل");
+      const subscription = m.store.subscription;
+      if (
+        !subscription ||
+        !(
+          subscription.status === "ACTIVE" ||
+          subscription.status === "TRIALING"
+        ) ||
+        subscription.currentPeriodEnd <= new Date()
+      )
+        throw new AppError(
+          402,
+          "SUBSCRIPTION_REQUIRED",
+          "الاشتراك منتهي؛ جدده لمواصلة استعمال المنصة",
+        );
+    }
+
+    req.auth = {
+      userId: payload.sub,
+      storeId: payload.storeId,
+      role: m.role,
+      platformRole: m.user.platformRole,
+    };
     next();
   } catch (e) {
     next(
@@ -103,6 +112,14 @@ export const authenticate: RequestHandler = async (req, _res, next) => {
     );
   }
 };
+export const requirePlatformAdmin: RequestHandler = (req, _res, next) => {
+  if (!req.auth || req.auth.platformRole !== "SUPER_ADMIN")
+    return next(
+      new AppError(403, "PLATFORM_ADMIN_REQUIRED", "هذه الصفحة خاصة بمالك المنصة"),
+    );
+  next();
+};
+
 const rank: Record<StoreRole, number> = {
   VIEWER: 0,
   AGENT: 1,

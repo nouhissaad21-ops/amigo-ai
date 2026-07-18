@@ -14,6 +14,7 @@ import { errorHandler, notFoundHandler } from "./errors.js";
 import { logger } from "./logger.js";
 import { cacheRedis } from "./queues.js";
 import { redisRateLimit } from "./rate-limit.js";
+import { adminRouter } from "./routes/admin.js";
 import { authRouter } from "./routes/auth.js";
 import { dashboardRouter } from "./routes/dashboard.js";
 import { integrationsRouter } from "./routes/integrations.js";
@@ -29,7 +30,28 @@ export function createApp() {
         req.headers["x-request-id"]?.toString() ?? crypto.randomUUID(),
     }),
   );
-  app.use(helmet({ crossOriginResourcePolicy: { policy: "same-site" } }));
+  app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        baseUri: ["'none'"],
+        connectSrc: ["'self'"],
+        fontSrc: ["'self'", "data:"],
+        formAction: ["'self'"],
+        frameAncestors: ["'none'"],
+        imgSrc: ["'self'", "data:", "blob:"],
+        objectSrc: ["'none'"],
+        scriptSrc: ["'self'", "'unsafe-inline'"],
+        scriptSrcAttr: ["'none'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        upgradeInsecureRequests: [],
+      },
+    },
+    crossOriginResourcePolicy: { policy: "same-site" },
+    referrerPolicy: { policy: "strict-origin-when-cross-origin" },
+  }),
+);
   app.use(
     cors({
       origin: env.WEB_ORIGIN,
@@ -57,6 +79,7 @@ export function createApp() {
   app.use(redisRateLimit({ prefix: "api", windowMs: 60000, limit: 300 }));
   for (const prefix of ["/api", "/backend/api"]) {
     app.use(`${prefix}/auth`, authRouter);
+    app.use(`${prefix}/admin`, adminRouter);
     app.use(`${prefix}/integrations`, integrationsRouter);
     app.use(`${prefix}/dashboard`, dashboardRouter);
   }
