@@ -1,5 +1,5 @@
 import { env } from "./config.js";
-import { systemDb } from "./db.js";
+import { systemDb, tenantDb } from "./db.js";
 import { logger } from "./logger.js";
 
 async function bootstrapTenantRole() {
@@ -34,11 +34,26 @@ async function bootstrapTenantRole() {
       $amigo_bootstrap$;
     `);
   });
+
   logger.info("limited tenant database role is ready");
 }
 
 try {
   await bootstrapTenantRole();
+} catch (error) {
+  logger.error({ err: error }, "tenant role bootstrap failed");
+
+  // A managed provider can reject ALTER ROLE even when the already-created
+  // least-privilege login is still valid. Continue only after proving that the
+  // existing tenant credentials work; otherwise preserve the startup failure.
+  try {
+    await tenantDb.$queryRaw`SELECT 1`;
+    logger.warn(
+      "existing limited tenant role verified; continuing without rotation",
+    );
+  } catch {
+    throw error;
+  }
 } finally {
-  await systemDb.$disconnect();
+  await Promise.all([systemDb.$disconnect(), tenantDb.$disconnect()]);
 }
