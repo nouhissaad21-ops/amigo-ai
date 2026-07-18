@@ -25,6 +25,7 @@ async function recoverStaleEvents() {
     },
     take: 1000,
   });
+
   for (const event of stale) {
     if (event.status === "PROCESSING")
       await systemDb.webhookEvent.update({
@@ -35,29 +36,54 @@ async function recoverStaleEvents() {
   }
 }
 
+function logRecoveryError(error: unknown) {
+  logger.error({ err: error }, "stale event recovery failed");
+}
+
 export async function startInboundWorker() {
   const connection = new Redis(env.REDIS_URL, {
-      maxRetriesPerRequest: null,
-      enableReadyCheck: false,
-    }),
-    worker = new Worker<{ eventId: string }, void, "process">(
-      "inbound-messages",
-      (job) => processInboundEvent(job.data.eventId),
-      {
-        connection,
-        concurrency: env.WORKER_CONCURRENCY,
-        lockDuration: 120_000,
-      },
-    );
+    maxRetriesPerRequest: null,
+    enableReadyCheck: false,
+    connectTimeout: 3000,
+  });
+  connection.on("error", (error) =>
+    logger.error({ err: error }, "inbound worker Redis error"),
+  );
 
+  const worker = new Worker<{ eventId: string }, void, "process">(
+    "inbound-messages",
+    (job) => processInboundEvent(job.data.eventId),
+    {
+      connection,
+      concurrency: env.WORKER_CONCURRENCY,
+      lockDuration: 120_000,
+    },
+  );
+
+  worker.on("error", (error) => {
+    logger.error({ err: error }, "inbound worker error");
+  });
   worker.on("failed", (job, error) => {
     logger.error({ err: error, jobId: job?.id }, "inbound failed");
     if (job && job.attemptsMade >= (job.opts.attempts ?? 1))
-      void sendFallbackForEvent(job.data.eventId);
+      void sendFallbackForEvent(job.data.eventId).catch((fallbackError) => {
+        logger.error(
+          { err: fallbackError, jobId: job.id },
+          "fallback message failed",
+        );
+      });
   });
 
-  await recoverStaleEvents();
-  const timer = setInterval(() => void recoverStaleEvents(), 300_000);
+  try {
+    await recoverStaleEvents();
+  } catch (error) {
+    logRecoveryError(error);
+  }
+
+  const timer = setInterval(() => {
+    void recoverStaleEvents().catch(logRecoveryError);
+  }, 300_000);
+
   logger.info(
     { concurrency: env.WORKER_CONCURRENCY },
     "inbound worker started",
