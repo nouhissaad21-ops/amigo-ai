@@ -1,0 +1,70 @@
+services:
+  - type: keyvalue
+    name: amigo-ai-cache
+    plan: free
+    region: frankfurt
+    ipAllowList: []
+    maxmemoryPolicy: noeviction
+
+  - type: web
+    name: amigo-ai
+    runtime: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./deploy/render/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health/live
+    autoDeployTrigger: commit
+    maxShutdownDelaySeconds: 30
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: TRUST_PROXY_HOPS
+        value: 1
+      - key: LOG_LEVEL
+        value: info
+      - key: COOKIE_SECURE
+        value: true
+      - key: SERVE_STATIC_WEB
+        value: true
+      - key: STATIC_WEB_DIR
+        value: /app/apps/web/out
+      - key: RUN_INBOUND_WORKER
+        value: true
+      - key: WORKER_CONCURRENCY
+        value: 2
+      - key: ENABLE_BAILEYS
+        value: false
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: amigo-ai-cache
+          property: connectionString
+      - key: DATABASE_URL
+        sync: false
+      - key: AMIGO_TENANT_PASSWORD
+        generateValue: true
+      - key: CREDENTIAL_ENCRYPTION_KEY
+        generateValue: true
+      - key: JWT_SECRET
+        generateValue: true
+      - key: OAUTH_STATE_SECRET
+        generateValue: true
+      - key: AI_PROVIDER
+        value: groq
+      - key: AI_TIMEOUT_MS
+        value: 45000
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_BASE_URL
+        value: https://api.groq.com/openai/v1
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+      - key: XAI_STORE_RESPONSES
+        value: false
+      - key: META_VERIFY_TOKEN
+        generateValue: true
+      - key: META_GRAPH_VERSION
+        value: v25.0

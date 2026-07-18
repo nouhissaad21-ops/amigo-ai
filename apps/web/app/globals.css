@@ -1,0 +1,44 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  color: #17211d;
+  background: #f6f7f2;
+  font-family: "Noto Sans Arabic", Tahoma, Arial, sans-serif;
+}
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+@layer components {
+  .card {
+    @apply rounded-3xl border border-black/5 bg-white shadow-card;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-2xl px-4 py-2.5 text-sm font-bold transition disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply btn bg-mint-600 text-white hover:bg-mint-700;
+  }
+  .btn-secondary {
+    @apply btn border border-black/10 bg-white hover:border-mint-500;
+  }
+  .btn-danger {
+    @apply btn bg-red-50 text-red-700;
+  }
+  .field {
+    @apply w-full rounded-2xl border border-black/10 bg-white px-4 py-3 text-sm outline-none focus:border-mint-500 focus:ring-4 focus:ring-mint-100;
+  }
+  .label {
+    @apply mb-2 block text-sm font-bold text-ink/75;
+  }
+  .badge {
+    @apply inline-flex items-center rounded-full px-2.5 py-1 text-xs font-bold;
+  }
+}

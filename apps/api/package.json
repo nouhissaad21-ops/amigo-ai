@@ -1,0 +1,45 @@
+{
+  "name": "@amigo/api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "dev:worker": "tsx watch src/worker.ts",
+    "dev:whatsapp": "tsx watch src/whatsapp-gateway.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "start:worker": "node dist/worker.js",
+    "start:whatsapp": "node dist/whatsapp-gateway.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@prisma/client": "6.19.3",
+    "@whiskeysockets/baileys": "7.0.0-rc13",
+    "argon2": "0.44.0",
+    "bullmq": "5.80.8",
+    "compression": "1.8.1",
+    "cookie-parser": "1.4.7",
+    "cors": "2.8.5",
+    "dotenv": "17.2.3",
+    "express": "5.2.1",
+    "helmet": "8.1.0",
+    "ioredis": "5.11.1",
+    "jose": "6.2.3",
+    "pino": "10.3.1",
+    "pino-http": "11.0.0",
+    "qrcode": "1.5.4",
+    "zod": "4.1.12"
+  },
+  "devDependencies": {
+    "@types/compression": "1.8.1",
+    "@types/cookie-parser": "1.4.9",
+    "@types/cors": "2.8.19",
+    "@types/express": "5.0.5",
+    "@types/node": "24.10.1",
+    "@types/qrcode": "1.5.6",
+    "tsx": "4.20.6",
+    "vitest": "4.0.15"
+  }
+}

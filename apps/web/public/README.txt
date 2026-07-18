@@ -1,0 +1,1 @@
+AmiGo public assets.

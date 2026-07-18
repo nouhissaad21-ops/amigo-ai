@@ -1,0 +1,551 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum StoreRole {
+  OWNER
+  ADMIN
+  AGENT
+  VIEWER
+}
+
+enum SubscriptionPlan {
+  TRIAL
+  STARTER
+  GROWTH
+  ENTERPRISE
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  PAUSED
+  CANCELED
+}
+
+enum ChannelType {
+  FACEBOOK
+  INSTAGRAM
+  WHATSAPP_CLOUD
+  WHATSAPP_BAILEYS
+}
+
+enum ChannelStatus {
+  PENDING
+  CONNECTED
+  DISCONNECTED
+  ERROR
+}
+
+enum ConnectorType {
+  GOOGLE_SHEETS
+  YALIDINE
+  ZR_EXPRESS
+}
+
+enum ProductStatus {
+  ACTIVE
+  DRAFT
+  ARCHIVED
+}
+
+enum ConversationStatus {
+  OPEN
+  HANDOFF
+  CLOSED
+  BLOCKED
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+  INTERNAL
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  TOOL
+  SYSTEM
+}
+
+enum MessageStatus {
+  RECEIVED
+  QUEUED
+  PROCESSING
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+enum LeadStatus {
+  NEW
+  QUALIFIED
+  CONVERTED
+  LOST
+}
+
+enum OrderStatus {
+  CAPTURED
+  CONFIRMED
+  PACKING
+  SHIPPED
+  DELIVERED
+  CANCELED
+  RETURNED
+}
+
+enum WebhookStatus {
+  RECEIVED
+  PROCESSING
+  COMPLETED
+  FAILED
+  IGNORED
+}
+
+enum ShippingProvider {
+  YALIDINE
+  ZR_EXPRESS
+}
+
+enum DispatchStatus {
+  PENDING
+  ACCEPTED
+  FAILED
+  CANCELED
+}
+
+model Store {
+  id               String             @id @default(uuid()) @db.Uuid
+  name             String
+  slug             String             @unique
+  currency         String             @default("DZD")
+  timezone         String             @default("Africa/Algiers")
+  locale           String             @default("ar-DZ")
+  isActive         Boolean            @default(true)
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+  deletedAt        DateTime?
+  memberships      StoreMembership[]
+  subscription     Subscription?
+  channels         Channel[]
+  connectors       Connector[]
+  products         Product[]
+  rules            MerchantRules?
+  deliveryRates    DeliveryRate[]
+  conversations    Conversation[]
+  messages         Message[]
+  leads            Lead[]
+  orders           Order[]
+  orderItems       OrderItem[]
+  whatsappSessions WhatsAppSession[]
+  whatsappAuthKeys WhatsAppAuthKey[]
+  dispatches       ShippingDispatch[]
+  auditLogs        AuditLog[]
+
+  @@index([isActive, deletedAt])
+}
+
+model User {
+  id            String            @id @default(uuid()) @db.Uuid
+  email         String            @unique
+  passwordHash  String
+  fullName      String
+  status        UserStatus        @default(ACTIVE)
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+  memberships   StoreMembership[]
+  refreshTokens RefreshSession[]
+}
+
+model StoreMembership {
+  id        String    @id @default(uuid()) @db.Uuid
+  storeId   String    @db.Uuid
+  userId    String    @db.Uuid
+  role      StoreRole @default(AGENT)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  store     Store     @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([storeId, userId])
+  @@index([userId])
+}
+
+model Subscription {
+  id                 String             @id @default(uuid()) @db.Uuid
+  storeId            String             @unique @db.Uuid
+  plan               SubscriptionPlan   @default(TRIAL)
+  status             SubscriptionStatus @default(TRIALING)
+  currentPeriodStart DateTime           @default(now())
+  currentPeriodEnd   DateTime
+  cancelAtPeriodEnd  Boolean            @default(false)
+  providerCustomerId String?
+  providerContractId String?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+  store              Store              @relation(fields: [storeId], references: [id], onDelete: Cascade)
+}
+
+model Channel {
+  id                   String           @id @default(uuid()) @db.Uuid
+  storeId              String           @db.Uuid
+  type                 ChannelType
+  name                 String
+  status               ChannelStatus    @default(PENDING)
+  externalAccountId    String
+  externalBusinessId   String?
+  credentialsEncrypted String
+  credentialKeyVersion Int              @default(1)
+  webhookSubscribedAt  DateTime?
+  lastConnectedAt      DateTime?
+  lastError            String?
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
+  store                Store            @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  conversations        Conversation[]
+  messages             Message[]
+  leads                Lead[]
+  orders               Order[]
+  whatsappSession      WhatsAppSession?
+
+  @@unique([type, externalAccountId])
+  @@unique([storeId, id])
+  @@index([storeId, type, status])
+}
+
+model Connector {
+  id                   String        @id @default(uuid()) @db.Uuid
+  storeId              String        @db.Uuid
+  type                 ConnectorType
+  name                 String
+  enabled              Boolean       @default(true)
+  credentialsEncrypted String
+  config               Json          @default("{}")
+  lastError            String?
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+  store                Store         @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@unique([storeId, type])
+  @@index([storeId, enabled])
+}
+
+model Product {
+  id             String           @id @default(uuid()) @db.Uuid
+  storeId        String           @db.Uuid
+  sku            String
+  name           String
+  description    String           @default("")
+  basePrice      Decimal          @db.Decimal(12, 2)
+  promoPrice     Decimal?         @db.Decimal(12, 2)
+  currency       String           @default("DZD")
+  status         ProductStatus    @default(ACTIVE)
+  trackInventory Boolean          @default(true)
+  stockQuantity  Int              @default(0)
+  images         String[]
+  metadata       Json             @default("{}")
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  store          Store            @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  variants       ProductVariant[]
+  orderItems     OrderItem[]
+
+  @@unique([storeId, sku])
+  @@unique([storeId, id])
+  @@index([storeId, status])
+}
+
+model ProductVariant {
+  id            String      @id @default(uuid()) @db.Uuid
+  storeId       String      @db.Uuid
+  productId     String      @db.Uuid
+  sku           String
+  size          String?
+  color         String?
+  priceDelta    Decimal     @default(0) @db.Decimal(12, 2)
+  stockQuantity Int         @default(0)
+  isAvailable   Boolean     @default(true)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  product       Product     @relation(fields: [storeId, productId], references: [storeId, id], onDelete: Cascade)
+  orderItems    OrderItem[]
+
+  @@unique([storeId, productId, sku])
+  @@unique([storeId, id])
+  @@index([storeId, productId, isAvailable])
+}
+
+model MerchantRules {
+  id              String   @id @default(uuid()) @db.Uuid
+  storeId         String   @unique @db.Uuid
+  generalRules    String   @db.Text
+  exchangePolicy  String   @default("") @db.Text
+  specialOffers   String   @default("") @db.Text
+  fallbackMessage String   @default("سمحلي، صرا مشكل تقني صغير. نجاوبك بعد لحظات.")
+  updatedAt       DateTime @updatedAt
+  createdAt       DateTime @default(now())
+  store           Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+}
+
+model DeliveryRate {
+  id             String   @id @default(uuid()) @db.Uuid
+  storeId        String   @db.Uuid
+  wilayaCode     Int
+  wilayaName     String
+  homePrice      Decimal  @db.Decimal(12, 2)
+  deskPrice      Decimal? @db.Decimal(12, 2)
+  enabled        Boolean  @default(true)
+  municipalities Json     @default("[]")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  store          Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@unique([storeId, wilayaCode])
+  @@index([storeId, enabled])
+}
+
+model Conversation {
+  id                 String             @id @default(uuid()) @db.Uuid
+  storeId            String             @db.Uuid
+  channelId          String             @db.Uuid
+  customerExternalId String
+  customerName       String?
+  status             ConversationStatus @default(OPEN)
+  summary            String?            @db.Text
+  lastMessageAt      DateTime           @default(now())
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+  store              Store              @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  channel            Channel            @relation(fields: [storeId, channelId], references: [storeId, id], onDelete: Cascade)
+  messages           Message[]
+  leads              Lead[]
+  orders             Order[]
+
+  @@unique([storeId, channelId, customerExternalId])
+  @@unique([storeId, id])
+  @@index([storeId, status, lastMessageAt])
+}
+
+model Message {
+  id                String           @id @default(uuid()) @db.Uuid
+  storeId           String           @db.Uuid
+  conversationId    String           @db.Uuid
+  channelId         String           @db.Uuid
+  externalMessageId String?
+  sourceEventId     String?          @db.Uuid
+  direction         MessageDirection
+  role              MessageRole
+  content           String           @db.Text
+  payload           Json             @default("{}")
+  status            MessageStatus
+  error             String?
+  processedAt       DateTime?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  store             Store            @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  channel           Channel          @relation(fields: [storeId, channelId], references: [storeId, id], onDelete: Cascade)
+  conversation      Conversation     @relation(fields: [storeId, conversationId], references: [storeId, id], onDelete: Cascade)
+
+  @@unique([storeId, channelId, externalMessageId])
+  @@unique([storeId, sourceEventId, direction])
+  @@unique([storeId, id])
+  @@index([storeId, conversationId, createdAt])
+}
+
+model Lead {
+  id             String       @id @default(uuid()) @db.Uuid
+  storeId        String       @db.Uuid
+  conversationId String       @db.Uuid
+  channelId      String       @db.Uuid
+  fullName       String
+  phone          String
+  wilayaCode     Int
+  wilayaName     String
+  municipality   String
+  status         LeadStatus   @default(NEW)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  store          Store        @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  channel        Channel      @relation(fields: [storeId, channelId], references: [storeId, id], onDelete: Restrict)
+  conversation   Conversation @relation(fields: [storeId, conversationId], references: [storeId, id], onDelete: Restrict)
+  orders         Order[]
+
+  @@unique([storeId, id])
+  @@index([storeId, phone])
+  @@index([storeId, status, createdAt])
+}
+
+model Order {
+  id             String             @id @default(uuid()) @db.Uuid
+  storeId        String             @db.Uuid
+  conversationId String             @db.Uuid
+  channelId      String             @db.Uuid
+  leadId         String             @db.Uuid
+  orderNumber    String
+  idempotencyKey String
+  fullName       String
+  phone          String
+  wilayaCode     Int
+  wilayaName     String
+  municipality   String
+  deliveryType   String             @default("HOME")
+  subtotal       Decimal            @db.Decimal(12, 2)
+  deliveryPrice  Decimal            @db.Decimal(12, 2)
+  totalAmount    Decimal            @db.Decimal(12, 2)
+  currency       String             @default("DZD")
+  status         OrderStatus        @default(CAPTURED)
+  notes          String             @default("") @db.Text
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  store          Store              @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  channel        Channel            @relation(fields: [storeId, channelId], references: [storeId, id], onDelete: Restrict)
+  conversation   Conversation       @relation(fields: [storeId, conversationId], references: [storeId, id], onDelete: Restrict)
+  lead           Lead               @relation(fields: [storeId, leadId], references: [storeId, id], onDelete: Restrict)
+  items          OrderItem[]
+  dispatches     ShippingDispatch[]
+
+  @@unique([storeId, orderNumber])
+  @@unique([storeId, idempotencyKey])
+  @@unique([storeId, id])
+  @@index([storeId, status, createdAt])
+}
+
+model OrderItem {
+  id                  String          @id @default(uuid()) @db.Uuid
+  storeId             String          @db.Uuid
+  orderId             String          @db.Uuid
+  productId           String          @db.Uuid
+  variantId           String?         @db.Uuid
+  productNameSnapshot String
+  variantSnapshot     String?
+  skuSnapshot         String
+  unitPrice           Decimal         @db.Decimal(12, 2)
+  quantity            Int
+  lineTotal           Decimal         @db.Decimal(12, 2)
+  createdAt           DateTime        @default(now())
+  store               Store           @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  order               Order           @relation(fields: [storeId, orderId], references: [storeId, id], onDelete: Cascade)
+  product             Product         @relation(fields: [storeId, productId], references: [storeId, id], onDelete: Restrict)
+  variant             ProductVariant? @relation(fields: [storeId, variantId], references: [storeId, id], onDelete: Restrict)
+
+  @@index([storeId, orderId])
+}
+
+model WebhookEvent {
+  id          String        @id @default(uuid()) @db.Uuid
+  provider    String
+  eventKey    String
+  storeId     String?       @db.Uuid
+  channelId   String?       @db.Uuid
+  status      WebhookStatus @default(RECEIVED)
+  payload     Json
+  attempts    Int           @default(0)
+  lastError   String?
+  receivedAt  DateTime      @default(now())
+  processedAt DateTime?
+
+  @@unique([provider, eventKey])
+  @@index([status, receivedAt])
+  @@index([storeId, status])
+}
+
+model RefreshSession {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  storeId   String    @db.Uuid
+  tokenHash String    @unique
+  userAgent String?
+  ipAddress String?
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, storeId, expiresAt])
+}
+
+model WhatsAppSession {
+  id             String            @id @default(uuid()) @db.Uuid
+  storeId        String            @db.Uuid
+  channelId      String            @unique @db.Uuid
+  status         ChannelStatus     @default(PENDING)
+  credentialsEnc String
+  qrCodeDataUrl  String?           @db.Text
+  qrExpiresAt    DateTime?
+  phoneJid       String?
+  lastSeenAt     DateTime?
+  lastError      String?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  store          Store             @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  channel        Channel           @relation(fields: [storeId, channelId], references: [storeId, id], onDelete: Cascade)
+  keys           WhatsAppAuthKey[]
+
+  @@unique([storeId, id])
+  @@unique([storeId, channelId])
+  @@index([storeId, status])
+}
+
+model WhatsAppAuthKey {
+  id        String          @id @default(uuid()) @db.Uuid
+  storeId   String          @db.Uuid
+  sessionId String          @db.Uuid
+  category  String
+  keyId     String
+  valueEnc  String          @db.Text
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+  store     Store           @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  session   WhatsAppSession @relation(fields: [storeId, sessionId], references: [storeId, id], onDelete: Cascade)
+
+  @@unique([sessionId, category, keyId])
+  @@index([storeId, sessionId])
+}
+
+model ShippingDispatch {
+  id              String           @id @default(uuid()) @db.Uuid
+  storeId         String           @db.Uuid
+  orderId         String           @db.Uuid
+  provider        ShippingProvider
+  status          DispatchStatus   @default(PENDING)
+  externalId      String?
+  trackingNumber  String?
+  requestPayload  Json
+  responsePayload Json?
+  lastError       String?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  store           Store            @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  order           Order            @relation(fields: [storeId, orderId], references: [storeId, id], onDelete: Cascade)
+
+  @@unique([storeId, orderId])
+  @@index([storeId, status])
+}
+
+model AuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  storeId    String   @db.Uuid
+  userId     String?  @db.Uuid
+  action     String
+  entityType String
+  entityId   String?
+  metadata   Json     @default("{}")
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+  store      Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@index([storeId, createdAt])
+}
