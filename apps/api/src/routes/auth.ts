@@ -166,8 +166,16 @@ authRouter.post("/refresh", limiter, async (req, res) => {
   }
   const m = await systemDb.storeMembership.findUnique({
     where: { storeId_userId: { storeId: old.storeId, userId: old.userId } },
+    include: { store: { select: { isActive: true, deletedAt: true } } },
   });
-  if (!m) throw new AppError(403, "MEMBERSHIP_REVOKED", "الصلاحية ملغاة");
+  if (!m || !m.store.isActive || m.store.deletedAt) {
+    await systemDb.refreshSession.updateMany({
+      where: { userId: old.userId, storeId: old.storeId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+    clearAuthCookies(res);
+    throw new AppError(403, "MEMBERSHIP_REVOKED", "الصلاحية ملغاة");
+  }
   const next = randomToken();
   await systemDb.$transaction([
     systemDb.refreshSession.update({
