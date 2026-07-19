@@ -86,9 +86,12 @@ async function newState(req: Request, namespace: string) {
 
 integrationsRouter.get("/meta/status", authenticate, (_req, res) => {
   const configured = Boolean(env.META_APP_ID && env.META_APP_SECRET);
+  const instagramConfigured = Boolean(
+    env.INSTAGRAM_APP_ID && env.INSTAGRAM_APP_SECRET,
+  );
   res.json({
     configured,
-    instagramEnabled: env.META_ENABLE_INSTAGRAM && configured,
+    instagramEnabled: env.META_ENABLE_INSTAGRAM && instagramConfigured,
   });
 });
 
@@ -138,11 +141,15 @@ integrationsRouter.get(
   authenticate,
   requireRole("ADMIN"),
   async (req, res) => {
-    if (!env.META_ENABLE_INSTAGRAM)
+    if (
+      !env.META_ENABLE_INSTAGRAM ||
+      !env.INSTAGRAM_APP_ID ||
+      !env.INSTAGRAM_APP_SECRET
+    )
       throw new AppError(
         503,
         "INSTAGRAM_NOT_CONFIGURED",
-        "Instagram غير مفعّل في إعدادات المنصة",
+        "Instagram App ID وInstagram App Secret غير مضبوطين",
       );
     const state = await newState(req, "instagram");
     res.json({ url: instagramOAuthUrl(state) });

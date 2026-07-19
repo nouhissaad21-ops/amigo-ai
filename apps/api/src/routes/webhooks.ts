@@ -60,11 +60,11 @@ const metaText = (m: any) =>
 metaWebhookRouter.post("/", async (req, res) => {
   const raw = req.body as Buffer;
   const body = JSON.parse(raw.toString()) as any;
-  const secrets = [env.META_APP_SECRET].filter(
+  const secrets = [env.META_APP_SECRET, env.INSTAGRAM_APP_SECRET].filter(
     (secret): secret is string => Boolean(secret),
   );
   if (!secrets.length)
-    throw new AppError(503, "META_NOT_CONFIGURED", "Meta App Secret غير مضبوط");
+    throw new AppError(503, "META_NOT_CONFIGURED", "App Secret غير مضبوط");
   if (
     !secrets.some((secret) =>
       verifyHmacSignature(raw, req.get("x-hub-signature-256"), secret),

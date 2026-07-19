@@ -95,6 +95,8 @@ const schema = z
     XAI_STORE_RESPONSES: bool,
     META_APP_ID: z.string().min(1).optional(),
     META_APP_SECRET: z.string().min(1).optional(),
+    INSTAGRAM_APP_ID: z.string().min(1).optional(),
+    INSTAGRAM_APP_SECRET: z.string().min(1).optional(),
     META_VERIFY_TOKEN: z.string().min(16),
     META_GRAPH_VERSION: z
       .string()
@@ -127,13 +129,15 @@ const schema = z
         message: "META_APP_ID and META_APP_SECRET must be configured together",
       });
     if (
-      value.META_ENABLE_INSTAGRAM &&
-      (!value.META_APP_ID || !value.META_APP_SECRET)
+      Boolean(value.INSTAGRAM_APP_ID) !== Boolean(value.INSTAGRAM_APP_SECRET)
     )
       ctx.addIssue({
         code: "custom",
-        path: ["META_ENABLE_INSTAGRAM"],
-        message: "requires META_APP_ID and META_APP_SECRET",
+        path: [
+          value.INSTAGRAM_APP_ID ? "INSTAGRAM_APP_SECRET" : "INSTAGRAM_APP_ID",
+        ],
+        message:
+          "INSTAGRAM_APP_ID and INSTAGRAM_APP_SECRET must be configured together",
       });
   });
 
