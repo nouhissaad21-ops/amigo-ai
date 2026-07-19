@@ -67,6 +67,10 @@ services:
         sync: false
       - key: META_APP_SECRET
         sync: false
+      - key: INSTAGRAM_APP_ID
+        sync: false
+      - key: INSTAGRAM_APP_SECRET
+        sync: false
       - key: META_VERIFY_TOKEN
         generateValue: true
       - key: META_GRAPH_VERSION
