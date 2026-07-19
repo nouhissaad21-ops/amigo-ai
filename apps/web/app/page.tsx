@@ -48,6 +48,16 @@ const steps = [
   ["03", "خلي AmiGo يخدم", "المساعد يرد، يقترح ويحفظ الطلبيات تلقائياً."],
 ] as const;
 
+const channelPlatforms = [
+  { icon: Facebook, label: "Facebook", color: "text-[#1877f2]" },
+  { icon: Instagram, label: "Instagram", color: "text-pink-600" },
+  {
+    icon: MessageCircleMore,
+    label: "WhatsApp",
+    color: "text-[#25d366]",
+  },
+] as const;
+
 export default function Home() {
   return (
     <main className="min-h-screen overflow-hidden bg-[#f8faf9]">
@@ -175,16 +185,12 @@ export default function Home() {
             قناة واحدة أو كامل قنواتك — نفس المساعد ونفس الكتالوج
           </p>
           <div className="flex flex-wrap justify-center gap-3">
-            {[
-              [Facebook, "Facebook", "text-[#1877f2]"],
-              [Instagram, "Instagram", "text-pink-600"],
-              [MessageCircleMore, "WhatsApp", "text-[#25d366]"],
-            ].map(([Icon, label, color]) => (
+            {channelPlatforms.map(({ icon: Icon, label, color }) => (
               <span
                 className="flex items-center gap-2 rounded-2xl border border-slate-100 bg-white px-4 py-2 text-xs font-black text-slate-600 shadow-sm"
-                key={String(label)}
+                key={label}
               >
-                <Icon className={String(color)} size={17} /> {String(label)}
+                <Icon className={color} size={17} /> {label}
               </span>
             ))}
           </div>
