@@ -21,13 +21,16 @@ type InstagramProfile = InstagramErrorBody & {
 };
 
 function instagramCredentials() {
-  if (!env.META_APP_ID || !env.META_APP_SECRET)
+  if (!env.INSTAGRAM_APP_ID || !env.INSTAGRAM_APP_SECRET)
     throw new AppError(
       503,
       "INSTAGRAM_NOT_CONFIGURED",
-      "ربط Instagram مازال ما تفعّلش في إعدادات المنصة",
+      "Instagram App ID وInstagram App Secret غير مضبوطين",
     );
-  return { appId: env.META_APP_ID, appSecret: env.META_APP_SECRET };
+  return {
+    appId: env.INSTAGRAM_APP_ID,
+    appSecret: env.INSTAGRAM_APP_SECRET,
+  };
 }
 
 function redirectUri() {
