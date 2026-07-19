@@ -1,4 +1,4 @@
-import { Router, type Response } from "express";
+import { Router, type Request, type Response } from "express";
 import {
   authenticate,
   requireRole,
@@ -66,7 +66,7 @@ async function authorizeState(stateToken: string, namespace: string) {
   return state;
 }
 
-async function newState(req: Express.Request, namespace: string) {
+async function newState(req: Request, namespace: string) {
   const auth = req.auth!;
   const nonce = randomToken(20);
   const state = await signOAuthState({
