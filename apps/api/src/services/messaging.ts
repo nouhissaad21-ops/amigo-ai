@@ -4,7 +4,13 @@ import { AppError } from "../errors.js";
 import { whatsappOutboundQueue } from "../queues.js";
 import { decryptJson, metaAppSecretProof } from "../security.js";
 
-type Cred = { accessToken?: string; phoneNumberId?: string; wabaId?: string };
+type Cred = {
+  accessToken?: string;
+  phoneNumberId?: string;
+  wabaId?: string;
+  instagramUserId?: string;
+  oauthUserId?: string;
+};
 
 async function body(r: Response) {
   const t = await r.text();
@@ -44,12 +50,26 @@ async function facebook(c: Channel, to: string, text: string) {
   return b.message_id ?? crypto.randomUUID();
 }
 
+function unique(values: Array<string | null | undefined>) {
+  return [...new Set(values.map((value) => value?.trim()).filter(Boolean))] as string[];
+}
+
 async function instagram(c: Channel, to: string, text: string) {
   const x = decryptJson<Cred>(c.credentialsEncrypted);
   if (!x.accessToken) throw new AppError(500, "MISSING_TOKEN", "Token ناقص");
-  const r = await fetch(
-      `https://graph.instagram.com/${env.META_GRAPH_VERSION}/${c.externalAccountId}/messages`,
-      {
+  const accountIds = unique([
+    c.externalAccountId,
+    x.instagramUserId,
+    c.externalBusinessId,
+    x.oauthUserId,
+  ]);
+  const failures: string[] = [];
+
+  for (const accountId of accountIds) {
+    const url = new URL(
+      `https://graph.instagram.com/${env.META_GRAPH_VERSION}/${accountId}/messages`,
+    );
+    const r = await fetch(url, {
         method: "POST",
         headers: {
           authorization: `Bearer ${x.accessToken}`,
@@ -59,16 +79,17 @@ async function instagram(c: Channel, to: string, text: string) {
           recipient: { id: to },
           message: { text: text.slice(0, 1900) },
         }),
-      },
-    ),
-    b = await body(r);
-  if (!r.ok)
-    throw new AppError(
-      502,
-      "INSTAGRAM_SEND_FAILED",
-      b.error?.message ?? "فشل إرسال رسالة Instagram",
-    );
-  return b.message_id ?? crypto.randomUUID();
+      }),
+      b = await body(r);
+    if (r.ok) return b.message_id ?? crypto.randomUUID();
+    failures.push(b.error?.message ?? b.raw ?? `HTTP ${r.status}`);
+  }
+
+  throw new AppError(
+    502,
+    "INSTAGRAM_SEND_FAILED",
+    failures[0] ?? "فشل إرسال رسالة Instagram",
+  );
 }
 
 async function cloud(c: Channel, to: string, text: string) {
