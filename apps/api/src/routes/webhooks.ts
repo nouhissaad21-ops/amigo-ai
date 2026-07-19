@@ -1,8 +1,10 @@
+import crypto from "node:crypto";
 import { Router, type Request, type Response } from "express";
-import { Prisma } from "@prisma/client";
+import { Prisma, type Channel } from "@prisma/client";
 import { env } from "../config.js";
 import { systemDb } from "../db.js";
 import { AppError } from "../errors.js";
+import { logger } from "../logger.js";
 import { enqueueInbound } from "../queues.js";
 import { verifyHmacSignature } from "../security.js";
 import type { NormalizedInbound } from "../services/inbound.js";
@@ -50,16 +52,92 @@ async function persist(x: {
   }
 }
 
-const metaText = (m: any) =>
-  String(
-    m.text ??
-      m.quick_reply?.payload ??
-      (m.attachments?.length ? "[الزبون بعث مرفق أو صورة]" : ""),
-  );
+function uniqueIds(values: unknown[]) {
+  return [
+    ...new Set(
+      values
+        .filter((value): value is string | number =>
+          ["string", "number"].includes(typeof value),
+        )
+        .map(String)
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ),
+  ];
+}
+
+function messagingEvents(entry: any) {
+  const events = Array.isArray(entry?.messaging) ? [...entry.messaging] : [];
+  for (const change of entry?.changes ?? []) {
+    const value = change?.value;
+    if (Array.isArray(value?.messaging)) events.push(...value.messaging);
+    else if (value?.message || value?.postback) events.push(value);
+  }
+  return events;
+}
+
+function accountIds(entry: any, event: any) {
+  return uniqueIds([
+    entry?.id,
+    event?.recipient?.id,
+    event?.message?.recipient?.id,
+    event?.postback?.recipient?.id,
+  ]);
+}
+
+async function connectedChannel(
+  type: "FACEBOOK" | "INSTAGRAM",
+  ids: string[],
+): Promise<Channel | null> {
+  if (!ids.length) return null;
+  return systemDb.channel.findFirst({
+    where: {
+      type,
+      status: "CONNECTED",
+      OR: [
+        { externalAccountId: { in: ids } },
+        { externalBusinessId: { in: ids } },
+      ],
+    },
+  });
+}
+
+function metaText(event: any) {
+  const message = event?.message;
+  const postback = event?.postback;
+  return String(
+    message?.text ??
+      message?.quick_reply?.payload ??
+      postback?.title ??
+      postback?.payload ??
+      (message?.attachments?.length
+        ? "[الزبون بعث مرفق أو صورة]"
+        : ""),
+  ).trim();
+}
+
+function eventMessageId(event: any, accountId: string, text: string) {
+  const supplied =
+    event?.message?.mid ??
+    event?.postback?.mid ??
+    event?.mid ??
+    event?.message_id;
+  if (supplied) return String(supplied);
+  return `synthetic-${crypto
+    .createHash("sha256")
+    .update(
+      JSON.stringify({
+        accountId,
+        sender: event?.sender?.id,
+        timestamp: event?.timestamp,
+        text,
+      }),
+    )
+    .digest("hex")}`;
+}
 
 metaWebhookRouter.post("/", async (req, res) => {
   const raw = req.body as Buffer;
-  const body = JSON.parse(raw.toString()) as any;
   const secrets = [env.META_APP_SECRET, env.INSTAGRAM_APP_SECRET].filter(
     (secret): secret is string => Boolean(secret),
   );
@@ -72,40 +150,73 @@ metaWebhookRouter.post("/", async (req, res) => {
   )
     throw new AppError(401, "INVALID_META_SIGNATURE", "توقيع غير صالح");
 
+  const body = JSON.parse(raw.toString()) as any;
   const type = body.object === "instagram" ? "INSTAGRAM" : "FACEBOOK";
   const jobs: Promise<void>[] = [];
+  let received = 0;
+  let routed = 0;
+
   for (const entry of body.entry ?? []) {
-    const c = await systemDb.channel.findUnique({
-      where: {
-        type_externalAccountId: { type, externalAccountId: String(entry.id) },
-      },
-    });
-    if (!c || c.status !== "CONNECTED") continue;
-    for (const x of entry.messaging ?? []) {
-      const m = x.message;
-      if (!m?.mid || m.is_echo) continue;
-      const t = metaText(m);
-      if (t)
-        jobs.push(
-          persist({
-            provider: `META_${type}`,
-            eventKey: `${c.id}:${String(m.mid)}`,
-            storeId: c.storeId,
-            channelId: c.id,
-            payload: {
-              externalMessageId: String(m.mid),
-              customerExternalId: String(x.sender?.id ?? ""),
-              text: t,
-              timestamp: new Date(
-                Number(x.timestamp ?? Date.now()),
-              ).toISOString(),
-              rawType: m.attachments ? "attachment" : "text",
-            },
-          }),
+    for (const event of messagingEvents(entry)) {
+      received++;
+      const ids = accountIds(entry, event);
+      const channel = await connectedChannel(type, ids);
+      if (!channel) {
+        logger.warn(
+          {
+            webhookObject: body.object,
+            channelType: type,
+            candidateAccountIds: ids,
+            senderId: event?.sender?.id,
+          },
+          "Meta webhook could not be matched to a connected channel",
         );
+        continue;
+      }
+
+      const senderId = String(event?.sender?.id ?? "").trim();
+      const message = event?.message;
+      const senderIsBusiness = ids.includes(senderId);
+      if (
+        !senderId ||
+        message?.is_echo ||
+        (message?.is_self && senderIsBusiness)
+      )
+        continue;
+
+      const text = metaText(event);
+      if (!text) continue;
+      const externalMessageId = eventMessageId(event, ids[0] ?? channel.externalAccountId, text);
+      routed++;
+      jobs.push(
+        persist({
+          provider: `META_${type}`,
+          eventKey: `${channel.id}:${externalMessageId}`,
+          storeId: channel.storeId,
+          channelId: channel.id,
+          payload: {
+            externalMessageId,
+            customerExternalId: senderId,
+            text,
+            timestamp: new Date(
+              Number(event?.timestamp ?? entry?.time ?? Date.now()),
+            ).toISOString(),
+            rawType: event?.postback
+              ? "postback"
+              : message?.attachments
+                ? "attachment"
+                : "text",
+          },
+        }),
+      );
     }
   }
+
   await Promise.all(jobs);
+  logger.info(
+    { webhookObject: body.object, channelType: type, received, routed },
+    "Meta webhook processed",
+  );
   res.status(200).send("EVENT_RECEIVED");
 });
 
