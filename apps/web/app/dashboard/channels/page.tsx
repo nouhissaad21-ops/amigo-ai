@@ -89,7 +89,7 @@ export default function Channels() {
       window.history.replaceState({}, "", "/dashboard/channels/");
     } else if (params.get("meta") === "error") {
       const reason = params.get("reason") ?? "UNKNOWN";
-      setError(metaErrorMessage[reason] ?? metaErrorMessage.UNKNOWN);
+      setError(metaErrorMessage[reason] ?? "حدث خطأ غير متوقع أثناء ربط Meta.");
       window.history.replaceState({}, "", "/dashboard/channels/");
     }
   }, [load]);
