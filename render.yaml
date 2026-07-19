@@ -46,7 +46,7 @@ services:
       - key: AMIGO_TENANT_PASSWORD
         generateValue: true
       - key: CREDENTIAL_ENCRYPTION_KEY
-        generateValue: true
+        sync: false
       - key: JWT_SECRET
         generateValue: true
       - key: OAUTH_STATE_SECRET
