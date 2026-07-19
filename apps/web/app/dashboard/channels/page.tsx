@@ -36,7 +36,7 @@ type MetaCapabilities = {
 const metaErrorMessage: Record<string, string> = {
   META_NOT_CONFIGURED:
     "إعداد Meta غير مكتمل عند مالك المنصة. يلزم App ID وApp Secret مرة واحدة فقط.",
-  META_OAUTH_DENIED: "تم إلغاء الربط قبل منح الصلاحيات.",
+  META_OAUTH_DENIED: "تم إلغاء ربط Facebook قبل منح الصلاحيات.",
   META_CODE_EXCHANGE_FAILED:
     "Meta رفضت إكمال جلسة الربط. أعد المحاولة من حساب يدير الصفحة.",
   META_LONG_TOKEN_FAILED: "تعذر إنشاء رمز وصول طويل المدة.",
@@ -45,7 +45,16 @@ const metaErrorMessage: Record<string, string> = {
     "لم نجد صفحة Facebook يديرها هذا الحساب. تأكد أنك مسؤول في الصفحة ثم أعد المحاولة.",
   META_SUBSCRIBE_ERROR:
     "تم العثور على الصفحة لكن Meta رفضت تفعيل استقبال الرسائل. راجع صلاحية pages_messaging وWebhook في تطبيق Meta.",
+  INSTAGRAM_NOT_CONFIGURED: "إعداد Instagram غير مكتمل في تطبيق Meta.",
+  INSTAGRAM_OAUTH_DENIED: "تم إلغاء ربط Instagram قبل منح الصلاحيات.",
+  INSTAGRAM_CODE_EXCHANGE_FAILED: "Instagram رفضت إكمال جلسة الربط.",
+  INSTAGRAM_LONG_TOKEN_FAILED: "تعذر إنشاء رمز Instagram طويل المدة.",
+  INSTAGRAM_API_ERROR: "Instagram رفضت قراءة بيانات الحساب.",
+  INSTAGRAM_ACCOUNT_NOT_FOUND: "لم نجد حساب Instagram احترافياً لهذا المستخدم.",
+  INSTAGRAM_SUBSCRIBE_ERROR:
+    "تم العثور على Instagram لكن تعذر تفعيل استقبال الرسائل.",
   OAUTH_REPLAYED: "انتهت صلاحية رابط الربط. اضغط ربط من جديد.",
+  MISSING_OAUTH_STATE: "انتهت أو تعطلت جلسة الربط. ابدأ الربط من جديد.",
   UNKNOWN: "حدث خطأ غير متوقع أثناء الربط.",
 };
 
@@ -56,9 +65,9 @@ export default function Channels() {
   const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(true);
   const [metaCapabilities, setMetaCapabilities] = useState<MetaCapabilities>();
-  const [connecting, setConnecting] = useState<"meta" | "cloud" | "qr" | "">(
-    "",
-  );
+  const [connecting, setConnecting] = useState<
+    "meta" | "instagram" | "cloud" | "qr" | ""
+  >("");
 
   const load = useCallback(async () => {
     try {
@@ -82,14 +91,20 @@ export default function Channels() {
     const params = new URLSearchParams(window.location.search);
     if (params.get("meta") === "connected") {
       const facebook = Number(params.get("facebook") ?? 0);
-      const instagram = Number(params.get("instagram") ?? 0);
-      setNotice(
-        `تم ربط Meta بنجاح: ${facebook} صفحة Facebook${instagram ? ` و${instagram} حساب Instagram` : ""}.`,
-      );
+      setNotice(`تم ربط Facebook بنجاح: ${facebook} صفحة.`);
       window.history.replaceState({}, "", "/dashboard/channels/");
     } else if (params.get("meta") === "error") {
       const reason = params.get("reason") ?? "UNKNOWN";
       setError(metaErrorMessage[reason] ?? "حدث خطأ غير متوقع أثناء ربط Meta.");
+      window.history.replaceState({}, "", "/dashboard/channels/");
+    } else if (params.get("instagram") === "connected") {
+      setNotice("تم ربط Instagram بنجاح.");
+      window.history.replaceState({}, "", "/dashboard/channels/");
+    } else if (params.get("instagram") === "error") {
+      const reason = params.get("reason") ?? "UNKNOWN";
+      setError(
+        metaErrorMessage[reason] ?? "حدث خطأ غير متوقع أثناء ربط Instagram.",
+      );
       window.history.replaceState({}, "", "/dashboard/channels/");
     }
   }, [load]);
@@ -121,6 +136,20 @@ export default function Channels() {
     try {
       const { url } = await api.get<{ url: string }>(
         "/api/integrations/meta/start",
+      );
+      window.location.assign(url);
+    } catch (reason) {
+      setError((reason as Error).message);
+      setConnecting("");
+    }
+  }
+
+  async function connectInstagram() {
+    setError("");
+    setConnecting("instagram");
+    try {
+      const { url } = await api.get<{ url: string }>(
+        "/api/integrations/instagram/start",
       );
       window.location.assign(url);
     } catch (reason) {
@@ -194,20 +223,20 @@ export default function Channels() {
     {
       key: "instagram",
       title: "Instagram Business",
-      description: "رسائل Instagram لحساب تجاري مربوط بصفحة Facebook.",
+      description: "استقبل رسائل حساب Instagram الاحترافي ورد عليها تلقائياً.",
       icon: Instagram,
       iconClass:
         "bg-gradient-to-br from-violet-600 via-pink-500 to-amber-400 text-white",
       tint: "from-pink-50 to-white",
       accounts: grouped.instagram,
-      action: connectMeta,
+      action: connectInstagram,
       actionLabel: metaCapabilities?.instagramEnabled
         ? "ربط Instagram"
         : "بانتظار تفعيل Instagram",
       disabled: !metaCapabilities?.instagramEnabled,
       note: metaCapabilities?.instagramEnabled
-        ? "سيظهر الحساب التجاري المتصل بصفحة Facebook تلقائياً."
-        : "مالك المنصة يفعّل Instagram API ومراجعة Meta مرة واحدة؛ بعدها التاجر يربطه بضغطة.",
+        ? "تسجيل مباشر وآمن عبر Instagram Business Login."
+        : "مالك المنصة يفعّل Instagram API مرة واحدة؛ بعدها التاجر يربطه بضغطة.",
     },
     {
       key: "whatsapp",
@@ -284,6 +313,9 @@ export default function Channels() {
             (channel) => channel.status === "CONNECTED",
           ).length;
           const Icon = provider.icon;
+          const providerLoading =
+            (provider.key === "facebook" && connecting === "meta") ||
+            (provider.key === "instagram" && connecting === "instagram");
           return (
             <article
               className={`card relative overflow-hidden bg-gradient-to-b ${provider.tint} p-6`}
@@ -354,10 +386,14 @@ export default function Channels() {
                     ? "btn-secondary mt-5 w-full"
                     : "btn-primary mt-5 w-full"
                 }
-                disabled={provider.disabled || connecting === "meta"}
+                disabled={
+                  provider.disabled ||
+                  connecting === "meta" ||
+                  connecting === "instagram"
+                }
                 onClick={() => void provider.action()}
               >
-                {connecting === "meta" && provider.key !== "whatsapp" ? (
+                {providerLoading ? (
                   <Loader2 className="animate-spin" size={18} />
                 ) : (
                   <Plus size={18} />

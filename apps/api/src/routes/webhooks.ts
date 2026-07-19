@@ -6,8 +6,10 @@ import { AppError } from "../errors.js";
 import { enqueueInbound } from "../queues.js";
 import { verifyHmacSignature } from "../security.js";
 import type { NormalizedInbound } from "../services/inbound.js";
+
 export const metaWebhookRouter = Router(),
   whatsappWebhookRouter = Router();
+
 function verify(req: Request, res: Response) {
   if (
     req.query["hub.mode"] === "subscribe" &&
@@ -16,8 +18,10 @@ function verify(req: Request, res: Response) {
     return void res.status(200).send(String(req.query["hub.challenge"] ?? ""));
   throw new AppError(403, "INVALID_VERIFY_TOKEN", "Verify token غير صحيح");
 }
+
 metaWebhookRouter.get("/", verify);
 whatsappWebhookRouter.get("/", verify);
+
 async function persist(x: {
   provider: string;
   eventKey: string;
@@ -45,27 +49,31 @@ async function persist(x: {
     throw err;
   }
 }
+
 const metaText = (m: any) =>
   String(
     m.text ??
       m.quick_reply?.payload ??
       (m.attachments?.length ? "[الزبون بعث مرفق أو صورة]" : ""),
   );
+
 metaWebhookRouter.post("/", async (req, res) => {
   const raw = req.body as Buffer;
-  if (!env.META_APP_SECRET)
+  const body = JSON.parse(raw.toString()) as any;
+  const secrets = [env.META_APP_SECRET].filter(
+    (secret): secret is string => Boolean(secret),
+  );
+  if (!secrets.length)
     throw new AppError(503, "META_NOT_CONFIGURED", "Meta App Secret غير مضبوط");
   if (
-    !verifyHmacSignature(
-      raw,
-      req.get("x-hub-signature-256"),
-      env.META_APP_SECRET,
+    !secrets.some((secret) =>
+      verifyHmacSignature(raw, req.get("x-hub-signature-256"), secret),
     )
   )
     throw new AppError(401, "INVALID_META_SIGNATURE", "توقيع غير صالح");
-  const body = JSON.parse(raw.toString()) as any,
-    type = body.object === "instagram" ? "INSTAGRAM" : "FACEBOOK",
-    jobs: Promise<void>[] = [];
+
+  const type = body.object === "instagram" ? "INSTAGRAM" : "FACEBOOK";
+  const jobs: Promise<void>[] = [];
   for (const entry of body.entry ?? []) {
     const c = await systemDb.channel.findUnique({
       where: {
@@ -100,6 +108,7 @@ metaWebhookRouter.post("/", async (req, res) => {
   await Promise.all(jobs);
   res.status(200).send("EVENT_RECEIVED");
 });
+
 const waText = (m: any) =>
   String(
     m.type === "text"
@@ -113,6 +122,7 @@ const waText = (m: any) =>
             ? (m.image?.caption ?? "[الزبون بعث صورة]")
             : "",
   );
+
 whatsappWebhookRouter.post("/", async (req, res) => {
   const raw = req.body as Buffer;
   if (!env.META_APP_SECRET)
