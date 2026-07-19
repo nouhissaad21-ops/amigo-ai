@@ -143,15 +143,17 @@ async function subscribeInstagram(id: string, token: string) {
 async function saveInstagram(input: {
   storeId: string;
   externalAccountId: string;
+  externalBusinessId: string;
   username?: string;
   accessToken: string;
 }): Promise<Channel> {
-  const old = await systemDb.channel.findUnique({
+  const old = await systemDb.channel.findFirst({
     where: {
-      type_externalAccountId: {
-        type: "INSTAGRAM",
-        externalAccountId: input.externalAccountId,
-      },
+      type: "INSTAGRAM",
+      OR: [
+        { externalAccountId: input.externalAccountId },
+        { externalBusinessId: input.externalBusinessId },
+      ],
     },
   });
   if (old && old.storeId !== input.storeId)
@@ -161,9 +163,13 @@ async function saveInstagram(input: {
     storeId: input.storeId,
     type: "INSTAGRAM" as const,
     externalAccountId: input.externalAccountId,
-    externalBusinessId: null,
+    externalBusinessId: input.externalBusinessId,
     name: input.username ? `@${input.username}` : "Instagram Business",
-    credentialsEncrypted: encryptJson({ accessToken: input.accessToken }),
+    credentialsEncrypted: encryptJson({
+      accessToken: input.accessToken,
+      instagramUserId: input.externalAccountId,
+      oauthUserId: input.externalBusinessId,
+    }),
     status: "CONNECTED" as const,
     lastConnectedAt: new Date(),
     lastError: null,
@@ -222,7 +228,8 @@ export async function completeInstagramOAuth(storeId: string, code: string) {
     "me?fields=id,username",
     accessToken,
   );
-  const accountId = profile.id ?? String(shortData.user_id);
+  const oauthUserId = String(shortData.user_id);
+  const accountId = profile.id ?? oauthUserId;
   if (!accountId)
     throw new AppError(
       422,
@@ -233,6 +240,7 @@ export async function completeInstagramOAuth(storeId: string, code: string) {
   const channel = await saveInstagram({
     storeId,
     externalAccountId: accountId,
+    externalBusinessId: oauthUserId,
     username: profile.username,
     accessToken,
   });
@@ -241,7 +249,11 @@ export async function completeInstagramOAuth(storeId: string, code: string) {
     await subscribeInstagram(accountId, accessToken);
     await systemDb.channel.update({
       where: { id: channel.id },
-      data: { webhookSubscribedAt: new Date(), status: "CONNECTED" },
+      data: {
+        webhookSubscribedAt: new Date(),
+        status: "CONNECTED",
+        lastError: null,
+      },
     });
   } catch (error) {
     const message =
