@@ -21,16 +21,17 @@ type InstagramProfile = InstagramErrorBody & {
 };
 
 function instagramCredentials() {
-  if (!env.INSTAGRAM_APP_ID || !env.INSTAGRAM_APP_SECRET)
+  if (!env.META_APP_ID || !env.META_APP_SECRET)
     throw new AppError(
       503,
       "INSTAGRAM_NOT_CONFIGURED",
       "ربط Instagram مازال ما تفعّلش في إعدادات المنصة",
     );
-  return {
-    appId: env.INSTAGRAM_APP_ID,
-    appSecret: env.INSTAGRAM_APP_SECRET,
-  };
+  return { appId: env.META_APP_ID, appSecret: env.META_APP_SECRET };
+}
+
+function redirectUri() {
+  return `${env.API_PUBLIC_URL.replace(/\/$/, "")}/api/integrations/instagram/callback`;
 }
 
 async function responseJson<T>(response: Response): Promise<T & InstagramErrorBody> {
@@ -119,7 +120,7 @@ export function instagramOAuthUrl(state: string) {
   const credentials = instagramCredentials();
   const url = new URL("https://www.instagram.com/oauth/authorize");
   url.searchParams.set("client_id", credentials.appId);
-  url.searchParams.set("redirect_uri", env.INSTAGRAM_OAUTH_REDIRECT_URI);
+  url.searchParams.set("redirect_uri", redirectUri());
   url.searchParams.set("response_type", "code");
   url.searchParams.set(
     "scope",
@@ -137,7 +138,7 @@ export async function completeInstagramOAuth(storeId: string, code: string) {
     client_id: credentials.appId,
     client_secret: credentials.appSecret,
     grant_type: "authorization_code",
-    redirect_uri: env.INSTAGRAM_OAUTH_REDIRECT_URI,
+    redirect_uri: redirectUri(),
     code,
   });
   const shortResponse = await fetch(
