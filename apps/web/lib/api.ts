@@ -8,6 +8,12 @@ export class ApiError extends Error {
   }
 }
 
+const REQUEST_TIMEOUT_MS = 45000;
+
+function timeoutSignal() {
+  return AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+}
+
 async function request<T>(
   path: string,
   init: RequestInit,
@@ -17,6 +23,7 @@ async function request<T>(
   try {
     response = await fetch("/backend" + path, {
       ...init,
+      signal: init.signal ?? timeoutSignal(),
       credentials: "include",
       headers: {
         accept: "application/json",
@@ -24,7 +31,14 @@ async function request<T>(
         ...init.headers,
       },
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "TimeoutError") {
+      throw new ApiError(
+        0,
+        "REQUEST_TIMEOUT",
+        "الخادم تأخر في الرد. استنى شوية وعاود المحاولة.",
+      );
+    }
     throw new ApiError(
       0,
       "NETWORK_ERROR",
@@ -35,6 +49,7 @@ async function request<T>(
   if (response.status === 401 && retry && path !== "/api/auth/refresh") {
     const refreshed = await fetch("/backend/api/auth/refresh", {
       method: "POST",
+      signal: timeoutSignal(),
       credentials: "include",
       headers: { accept: "application/json" },
     }).catch(() => undefined);
