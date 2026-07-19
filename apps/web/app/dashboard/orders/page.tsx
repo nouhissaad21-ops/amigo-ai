@@ -56,17 +56,40 @@ export default function OrdersPage() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [status, setStatus] = useState<Status>("ALL");
   const [busy, setBusy] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState("");
 
-  const load = useCallback(async () => {
-    const result = await api.get<{ orders: Order[] }>(
-      `/api/dashboard/orders?status=${status}`,
-    );
-    setOrders(result.orders);
-  }, [status]);
+  const load = useCallback(
+    async (silent = false) => {
+      if (!silent) setLoading(true);
+      try {
+        const result = await api.get<{ orders: Order[] }>(
+          `/api/dashboard/orders?status=${status}`,
+        );
+        setOrders(result.orders);
+        setNotice((current) =>
+          current.startsWith("تعذر تحميل الطلبيات") ? "" : current,
+        );
+      } catch (error) {
+        setNotice(`تعذر تحميل الطلبيات: ${(error as Error).message}`);
+      } finally {
+        if (!silent) setLoading(false);
+      }
+    },
+    [status],
+  );
 
   useEffect(() => {
     void load();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void load(true);
+    }, 10_000);
+    const refreshOnFocus = () => void load(true);
+    window.addEventListener("focus", refreshOnFocus);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshOnFocus);
+    };
   }, [load]);
 
   const total = useMemo(
@@ -128,8 +151,12 @@ export default function OrdersPage() {
         description={`${orders.length} طلبية — ${total.toLocaleString("ar-DZ")} دج`}
         actions={
           <div className="flex flex-wrap gap-2">
-            <button className="btn-secondary" onClick={() => void load()}>
-              <RefreshCw />
+            <button
+              className="btn-secondary"
+              disabled={loading}
+              onClick={() => void load()}
+            >
+              <RefreshCw className={loading ? "animate-spin" : ""} />
               تحديث
             </button>
             <a
@@ -291,7 +318,7 @@ export default function OrdersPage() {
         </table>
         {!orders.length && (
           <div className="p-20 text-center text-black/50">
-            لا توجد طلبيات في هذا التصنيف.
+            {loading ? "جاري تحميل الطلبيات..." : "لا توجد طلبيات في هذا التصنيف."}
           </div>
         )}
       </div>
