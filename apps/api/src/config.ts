@@ -1,8 +1,6 @@
 import "dotenv/config";
 import { z } from "zod";
 
-// Render exposes its public URL only at runtime. Derive all same-origin URLs
-// before validation so a Blueprint deployment does not need hard-coded hosts.
 if (process.env.RENDER_EXTERNAL_URL) {
   const publicUrl = process.env.RENDER_EXTERNAL_URL.replace(/\/$/, "");
   process.env.WEB_ORIGIN ??= publicUrl;
@@ -10,8 +8,6 @@ if (process.env.RENDER_EXTERNAL_URL) {
   process.env.META_OAUTH_REDIRECT_URI ??= `${publicUrl}/api/integrations/meta/callback`;
 }
 
-// Neon gives us an owner URL. A separate limited SQL role is used by all
-// tenant-scoped queries; bootstrap-db.ts creates/rotates this role.
 if (
   !process.env.DATABASE_TENANT_URL &&
   process.env.DATABASE_URL &&
@@ -30,7 +26,8 @@ if (
 const bool = z
   .enum(["true", "false"])
   .default("false")
-  .transform((v) => v === "true");
+  .transform((value) => value === "true");
+
 const schema = z
   .object({
     NODE_ENV: z
@@ -75,6 +72,7 @@ const schema = z
     META_OAUTH_REDIRECT_URI: z
       .url()
       .default("http://localhost:4000/api/integrations/meta/callback"),
+    META_ENABLE_INSTAGRAM: bool,
   })
   .superRefine((value, ctx) => {
     const key =
@@ -97,11 +95,22 @@ const schema = z
         path: [value.META_APP_ID ? "META_APP_SECRET" : "META_APP_ID"],
         message: "META_APP_ID and META_APP_SECRET must be configured together",
       });
+    if (
+      value.META_ENABLE_INSTAGRAM &&
+      (!value.META_APP_ID || !value.META_APP_SECRET)
+    )
+      ctx.addIssue({
+        code: "custom",
+        path: ["META_ENABLE_INSTAGRAM"],
+        message: "requires META_APP_ID and META_APP_SECRET",
+      });
   });
+
 const parsed = schema.safeParse(process.env);
 if (!parsed.success)
   throw new Error(
-    `Invalid environment configuration: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`,
+    `Invalid environment configuration: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`,
   );
+
 export const env = parsed.data;
 export const isProduction = env.NODE_ENV === "production";
