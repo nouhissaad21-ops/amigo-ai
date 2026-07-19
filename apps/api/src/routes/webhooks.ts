@@ -91,7 +91,10 @@ type InstagramStoredCredentials = {
 };
 
 function channelAliases(channel: Channel) {
-  const aliases = [channel.externalAccountId, channel.externalBusinessId];
+  const aliases: Array<string | null | undefined> = [
+    channel.externalAccountId,
+    channel.externalBusinessId,
+  ];
   if (channel.type === "INSTAGRAM") {
     try {
       const credentials = decryptJson<InstagramStoredCredentials>(
@@ -138,12 +141,13 @@ async function connectedChannel(
   // Some Instagram Login webhook deployments have returned an account alias
   // different from both OAuth IDs. Falling back is safe only when the whole
   // installation has exactly one connected Instagram channel.
-  if (candidates.length === 1) {
+  const onlyChannel = candidates.length === 1 ? candidates[0] : undefined;
+  if (onlyChannel) {
     logger.warn(
-      { channelId: candidates[0].id, candidateAccountIds: ids },
+      { channelId: onlyChannel.id, candidateAccountIds: ids },
       "Using the only connected Instagram channel for unmatched webhook IDs",
     );
-    return candidates[0];
+    return onlyChannel;
   }
   return null;
 }
