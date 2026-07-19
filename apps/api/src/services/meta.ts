@@ -105,15 +105,12 @@ export function metaOAuthUrl(state: string) {
   );
   const scopes = [
     "pages_show_list",
+    "pages_read_engagement",
     "pages_manage_metadata",
     "pages_messaging",
   ];
   if (env.META_ENABLE_INSTAGRAM) {
-    scopes.push(
-      "pages_read_engagement",
-      "instagram_basic",
-      "instagram_manage_messages",
-    );
+    scopes.push("instagram_basic", "instagram_manage_messages");
   }
 
   url.searchParams.set("client_id", credentials.appId);
@@ -121,6 +118,7 @@ export function metaOAuthUrl(state: string) {
   url.searchParams.set("state", state);
   url.searchParams.set("response_type", "code");
   url.searchParams.set("scope", scopes.join(","));
+  url.searchParams.set("auth_type", "rerequest");
   return url.toString();
 }
 
@@ -172,7 +170,7 @@ export async function completeMetaOAuth(storeId: string, code: string) {
     throw new AppError(
       422,
       "META_NO_PAGES",
-      "هذا الحساب لا يدير أي صفحة Facebook متاحة للتطبيق",
+      "Meta لم تعرض أي صفحة لهذا الحساب. عيّن الصفحة للحساب داخل Business Portfolio، ثم احذف AmiGo AI من عمليات دمج الأعمال وأعد الربط.",
     );
 
   let facebook = 0;
