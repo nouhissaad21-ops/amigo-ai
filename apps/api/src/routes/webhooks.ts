@@ -6,7 +6,7 @@ import { systemDb } from "../db.js";
 import { AppError } from "../errors.js";
 import { logger } from "../logger.js";
 import { enqueueInbound } from "../queues.js";
-import { verifyHmacSignature } from "../security.js";
+import { decryptJson, verifyHmacSignature } from "../security.js";
 import type { NormalizedInbound } from "../services/inbound.js";
 
 export const metaWebhookRouter = Router(),
@@ -85,21 +85,71 @@ function accountIds(entry: any, event: any) {
   ]);
 }
 
+type InstagramStoredCredentials = {
+  instagramUserId?: string;
+  oauthUserId?: string;
+};
+
+function channelAliases(channel: Channel) {
+  const aliases: Array<string | null | undefined> = [
+    channel.externalAccountId,
+    channel.externalBusinessId,
+  ];
+  if (channel.type === "INSTAGRAM") {
+    try {
+      const credentials = decryptJson<InstagramStoredCredentials>(
+        channel.credentialsEncrypted,
+      );
+      aliases.push(credentials.instagramUserId, credentials.oauthUserId);
+    } catch (error) {
+      logger.warn(
+        { channelId: channel.id, err: error },
+        "Could not read Instagram channel aliases",
+      );
+    }
+  }
+  return uniqueIds(aliases);
+}
+
 async function connectedChannel(
   type: "FACEBOOK" | "INSTAGRAM",
   ids: string[],
 ): Promise<Channel | null> {
-  if (!ids.length) return null;
-  return systemDb.channel.findFirst({
-    where: {
-      type,
-      status: "CONNECTED",
-      OR: [
-        { externalAccountId: { in: ids } },
-        { externalBusinessId: { in: ids } },
-      ],
-    },
+  if (ids.length) {
+    const exact = await systemDb.channel.findFirst({
+      where: {
+        type,
+        status: "CONNECTED",
+        OR: [
+          { externalAccountId: { in: ids } },
+          { externalBusinessId: { in: ids } },
+        ],
+      },
+    });
+    if (exact) return exact;
+  }
+
+  if (type !== "INSTAGRAM") return null;
+  const candidates = await systemDb.channel.findMany({
+    where: { type: "INSTAGRAM", status: "CONNECTED" },
   });
+  const aliasMatch = candidates.find((channel) =>
+    channelAliases(channel).some((alias) => ids.includes(alias)),
+  );
+  if (aliasMatch) return aliasMatch;
+
+  // Some Instagram Login webhook deployments have returned an account alias
+  // different from both OAuth IDs. Falling back is safe only when the whole
+  // installation has exactly one connected Instagram channel.
+  const onlyChannel = candidates.length === 1 ? candidates[0] : undefined;
+  if (onlyChannel) {
+    logger.warn(
+      { channelId: onlyChannel.id, candidateAccountIds: ids },
+      "Using the only connected Instagram channel for unmatched webhook IDs",
+    );
+    return onlyChannel;
+  }
+  return null;
 }
 
 function metaText(event: any) {
@@ -138,6 +188,8 @@ function eventMessageId(event: any, accountId: string, text: string) {
 
 metaWebhookRouter.post("/", async (req, res) => {
   const raw = req.body as Buffer;
+  if (!Buffer.isBuffer(raw))
+    throw new AppError(400, "INVALID_WEBHOOK_BODY", "Webhook body غير صالح");
   const secrets = [env.META_APP_SECRET, env.INSTAGRAM_APP_SECRET].filter(
     (secret): secret is string => Boolean(secret),
   );
@@ -150,7 +202,12 @@ metaWebhookRouter.post("/", async (req, res) => {
   )
     throw new AppError(401, "INVALID_META_SIGNATURE", "توقيع غير صالح");
 
-  const body = JSON.parse(raw.toString()) as any;
+  let body: any;
+  try {
+    body = JSON.parse(raw.toString());
+  } catch {
+    throw new AppError(400, "INVALID_WEBHOOK_JSON", "Webhook JSON غير صالح");
+  }
   const type = body.object === "instagram" ? "INSTAGRAM" : "FACEBOOK";
   const jobs: Promise<void>[] = [];
   let received = 0;
@@ -176,7 +233,8 @@ metaWebhookRouter.post("/", async (req, res) => {
 
       const senderId = String(event?.sender?.id ?? "").trim();
       const message = event?.message;
-      const senderIsBusiness = ids.includes(senderId);
+      const businessAliases = channelAliases(channel);
+      const senderIsBusiness = businessAliases.includes(senderId);
       if (
         !senderId ||
         message?.is_echo ||
@@ -186,7 +244,11 @@ metaWebhookRouter.post("/", async (req, res) => {
 
       const text = metaText(event);
       if (!text) continue;
-      const externalMessageId = eventMessageId(event, ids[0] ?? channel.externalAccountId, text);
+      const externalMessageId = eventMessageId(
+        event,
+        ids[0] ?? channel.externalAccountId,
+        text,
+      );
       routed++;
       jobs.push(
         persist({

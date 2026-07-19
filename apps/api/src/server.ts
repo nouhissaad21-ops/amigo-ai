@@ -9,6 +9,7 @@ import {
   redis,
   whatsappOutboundQueue,
 } from "./queues.js";
+import { repairConnectedInstagramChannels } from "./services/instagram.js";
 import { startInboundWorker } from "./worker-runtime.js";
 
 type InboundWorker = Awaited<ReturnType<typeof startInboundWorker>>;
@@ -21,9 +22,14 @@ const server = http.createServer(createApp());
 server.listen(env.PORT, "0.0.0.0", () => {
   logger.info({ port: env.PORT }, "AmiGo API listening");
 
-  // Render must see an open HTTP port quickly. Database/Redis recovery can be
-  // slow after a free-tier cold start, so initialize the worker in the
-  // background after the web server is already accepting health checks.
+  // Render must see an open HTTP port quickly. Database/Redis recovery and
+  // external channel checks run in the background after health checks work.
+  void repairConnectedInstagramChannels()
+    .then((result) => logger.info(result, "Instagram channels checked"))
+    .catch((error: unknown) => {
+      logger.error({ err: error }, "Instagram startup repair failed");
+    });
+
   if (env.RUN_INBOUND_WORKER) {
     void startInboundWorker()
       .then(async (worker) => {

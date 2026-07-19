@@ -38,36 +38,76 @@ const text = (r: Resp) =>
     .map((x) => x.text ?? "")
     .join("\n")
     .trim();
+
+function retryBodies(body: Record<string, unknown>) {
+  const attempts = [body];
+  if (env.AI_PROVIDER !== "groq") return attempts;
+
+  if (body.tool_choice === "required")
+    attempts.push({
+      ...body,
+      tool_choice: "auto",
+      parallel_tool_calls: false,
+      temperature: 0.05,
+    });
+  else if (body.tool_choice === "none") {
+    const withoutTools = { ...body };
+    delete withoutTools.tools;
+    delete withoutTools.tool_choice;
+    attempts.push(withoutTools);
+  } else if (Array.isArray(body.tools))
+    attempts.push({
+      ...body,
+      parallel_tool_calls: false,
+      temperature: 0.1,
+    });
+
+  return attempts;
+}
+
 async function call(body: Record<string, unknown>): Promise<Resp> {
   const p = provider();
-  const r = await fetch(`${p.baseUrl}/responses`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${p.apiKey}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(env.AI_TIMEOUT_MS),
-  });
-  if (!r.ok) {
-    logger.warn(
-      {
-        provider: p.name,
-        status: r.status,
-        detail: (await r.text()).slice(0, 1000),
+  let lastDetail = "";
+  let lastStatus = 502;
+
+  for (const [attempt, candidate] of retryBodies(body).entries()) {
+    const r = await fetch(`${p.baseUrl}/responses`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${p.apiKey}`,
+        "content-type": "application/json",
       },
-      "AI provider rejected",
-    );
-    throw new AppError(
-      502,
-      "AI_PROVIDER_ERROR",
-      "خدمة الذكاء الاصطناعي غير متاحة",
+      body: JSON.stringify(candidate),
+      signal: AbortSignal.timeout(env.AI_TIMEOUT_MS),
+    });
+    if (!r.ok) {
+      lastStatus = r.status;
+      lastDetail = (await r.text()).slice(0, 1000);
+      logger.warn(
+        {
+          provider: p.name,
+          status: r.status,
+          attempt: attempt + 1,
+          detail: lastDetail,
+        },
+        "AI provider rejected",
+      );
+      continue;
+    }
+    const result = (await r.json()) as Resp;
+    if (result.status === "completed" && !result.error) return result;
+    lastDetail = JSON.stringify(result.error ?? result.status).slice(0, 1000);
+    logger.warn(
+      { provider: p.name, attempt: attempt + 1, detail: lastDetail },
+      "AI response incomplete",
     );
   }
-  const result = (await r.json()) as Resp;
-  if (result.status !== "completed" || result.error)
-    throw new AppError(502, "AI_INCOMPLETE", "لم يكتمل الرد");
-  return result;
+
+  throw new AppError(
+    502,
+    lastStatus === 400 ? "AI_TOOL_CALL_REJECTED" : "AI_PROVIDER_ERROR",
+    "خدمة الذكاء الاصطناعي غير متاحة",
+  );
 }
 
 const tools = [createOrderTool, requestOrderDetailsTool];
@@ -192,7 +232,8 @@ export async function runMerchantAgent(c: {
 
   let source = first;
   let fc = functionCall(first);
-  if (!fc && orderDecisionNeeded(c.history)) {
+  const needsOrderDecision = !fc && orderDecisionNeeded(c.history);
+  if (needsOrderDecision) {
     source = await call({
       model: p.model,
       input: [
@@ -214,7 +255,14 @@ export async function runMerchantAgent(c: {
   }
 
   if (!fc) {
-    const answer = text(first);
+    const answer = text(source) || text(first);
+    if (needsOrderDecision) {
+      if (answer && !claimsOrderWasCreated(answer)) return { text: answer };
+      return {
+        text: "باش نثبت الطلبية فعلاً، زيدلي أو أكدلي المعلومة الناقصة وما نقولك تم حتى يخرج رقم الطلب من النظام.",
+        orderError: "ORDER_DECISION_WITHOUT_TOOL",
+      };
+    }
     if (!answer) throw new AppError(502, "AI_EMPTY_RESPONSE", "رد فارغ");
     if (claimsOrderWasCreated(answer)) {
       logger.warn(

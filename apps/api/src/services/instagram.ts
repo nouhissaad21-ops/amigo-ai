@@ -2,7 +2,8 @@ import type { Channel } from "@prisma/client";
 import { env } from "../config.js";
 import { systemDb } from "../db.js";
 import { AppError } from "../errors.js";
-import { encryptJson } from "../security.js";
+import { logger } from "../logger.js";
+import { decryptJson, encryptJson } from "../security.js";
 
 type InstagramErrorBody = {
   error?: { message?: string; code?: number; type?: string };
@@ -21,6 +22,19 @@ type InstagramProfile = InstagramErrorBody & {
   id?: string;
   username?: string;
 };
+
+type InstagramCredentials = {
+  accessToken?: string;
+  instagramUserId?: string;
+  oauthUserId?: string;
+};
+
+type SubscriptionResponse = InstagramErrorBody & {
+  success?: boolean;
+  data?: Array<{ id?: string; subscribed_fields?: string[] }>;
+};
+
+const requiredWebhookFields = ["messages", "messaging_postbacks"] as const;
 
 function instagramCredentials() {
   if (!env.INSTAGRAM_APP_ID || !env.INSTAGRAM_APP_SECRET)
@@ -125,19 +139,59 @@ async function instagramGraph<T>(
   return data;
 }
 
-async function subscribeInstagram(id: string, token: string) {
-  const path = `${id}/subscribed_apps?subscribed_fields=${encodeURIComponent(
-    "messages,messaging_postbacks",
-  )}`;
-  const result = await instagramGraph<{ success?: boolean }>(path, token, {
-    method: "POST",
+function subscriptionUrl(id: string, token: string) {
+  const url = new URL(
+    `https://graph.instagram.com/${env.META_GRAPH_VERSION}/${id}/subscribed_apps`,
+  );
+  // Meta documents both Bearer authentication and access_token on this endpoint.
+  // Sending both avoids regional/API-version inconsistencies without exposing it in logs.
+  url.searchParams.set("access_token", token);
+  return url;
+}
+
+async function readInstagramSubscription(id: string, token: string) {
+  const response = await fetch(subscriptionUrl(id, token), {
+    headers: { authorization: `Bearer ${token}` },
   });
-  if (result.success === false)
+  const data = await responseJson<SubscriptionResponse>(response);
+  if (!response.ok || data.error)
+    throw new AppError(
+      502,
+      "INSTAGRAM_SUBSCRIPTION_CHECK_FAILED",
+      instagramErrorMessage(data),
+    );
+  return new Set(
+    (data.data ?? []).flatMap((item) => item.subscribed_fields ?? []),
+  );
+}
+
+async function writeInstagramSubscription(id: string, token: string) {
+  const url = subscriptionUrl(id, token);
+  url.searchParams.set("subscribed_fields", requiredWebhookFields.join(","));
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}` },
+  });
+  const data = await responseJson<SubscriptionResponse>(response);
+  if (!response.ok || data.error || data.success === false)
     throw new AppError(
       502,
       "INSTAGRAM_SUBSCRIBE_ERROR",
-      "فشل تفعيل Webhook الخاص بـInstagram",
+      instagramErrorMessage(data) || "فشل تفعيل Webhook الخاص بـInstagram",
     );
+}
+
+export async function ensureInstagramSubscription(id: string, token: string) {
+  await writeInstagramSubscription(id, token);
+  const fields = await readInstagramSubscription(id, token);
+  const missing = requiredWebhookFields.filter((field) => !fields.has(field));
+  if (missing.length)
+    throw new AppError(
+      502,
+      "INSTAGRAM_SUBSCRIPTION_INCOMPLETE",
+      `اشتراك Instagram ناقص: ${missing.join(", ")}`,
+    );
+  return [...fields];
 }
 
 async function saveInstagram(input: {
@@ -177,6 +231,72 @@ async function saveInstagram(input: {
   return old
     ? systemDb.channel.update({ where: { id: old.id }, data })
     : systemDb.channel.create({ data });
+}
+
+function channelInstagramIds(channel: Channel, credentials: InstagramCredentials) {
+  return [
+    channel.externalAccountId,
+    credentials.instagramUserId,
+    channel.externalBusinessId,
+    credentials.oauthUserId,
+  ].filter((value, index, all): value is string =>
+    Boolean(value) && all.indexOf(value) === index,
+  );
+}
+
+export async function repairInstagramChannel(channel: Channel) {
+  if (channel.type !== "INSTAGRAM")
+    throw new AppError(422, "NOT_INSTAGRAM_CHANNEL", "القناة ليست Instagram");
+  const credentials = decryptJson<InstagramCredentials>(
+    channel.credentialsEncrypted,
+  );
+  if (!credentials.accessToken)
+    throw new AppError(500, "MISSING_TOKEN", "Instagram Token ناقص");
+
+  const failures: string[] = [];
+  for (const id of channelInstagramIds(channel, credentials)) {
+    try {
+      const fields = await ensureInstagramSubscription(id, credentials.accessToken);
+      await systemDb.channel.update({
+        where: { id: channel.id },
+        data: {
+          externalAccountId: id,
+          webhookSubscribedAt: new Date(),
+          status: "CONNECTED",
+          lastError: null,
+        },
+      });
+      return { id, fields };
+    } catch (error) {
+      failures.push(error instanceof Error ? error.message : "subscribe failed");
+    }
+  }
+
+  const message = failures[0] ?? "فشل إصلاح اشتراك Instagram";
+  await systemDb.channel.update({
+    where: { id: channel.id },
+    data: { status: "ERROR", lastError: message },
+  });
+  throw new AppError(502, "INSTAGRAM_REPAIR_FAILED", message);
+}
+
+export async function repairConnectedInstagramChannels() {
+  const channels = await systemDb.channel.findMany({
+    where: { type: "INSTAGRAM", status: { in: ["CONNECTED", "ERROR"] } },
+  });
+  let repaired = 0;
+  for (const channel of channels) {
+    try {
+      await repairInstagramChannel(channel);
+      repaired++;
+    } catch (error) {
+      logger.warn(
+        { channelId: channel.id, err: error },
+        "Instagram channel auto-repair failed",
+      );
+    }
+  }
+  return { checked: channels.length, repaired };
 }
 
 export function instagramOAuthUrl(state: string) {
@@ -245,25 +365,6 @@ export async function completeInstagramOAuth(storeId: string, code: string) {
     accessToken,
   });
 
-  try {
-    await subscribeInstagram(accountId, accessToken);
-    await systemDb.channel.update({
-      where: { id: channel.id },
-      data: {
-        webhookSubscribedAt: new Date(),
-        status: "CONNECTED",
-        lastError: null,
-      },
-    });
-  } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Instagram subscribe failed";
-    await systemDb.channel.update({
-      where: { id: channel.id },
-      data: { status: "ERROR", lastError: message },
-    });
-    throw error;
-  }
-
+  await repairInstagramChannel(channel);
   return { instagram: 1 };
 }
