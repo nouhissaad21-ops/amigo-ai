@@ -28,6 +28,37 @@ const bool = z
   .default("false")
   .transform((value) => value === "true");
 
+const encryptionKey = z.string().superRefine((value, ctx) => {
+  let decoded: Buffer;
+  try {
+    decoded = Buffer.from(value, "base64");
+  } catch {
+    ctx.addIssue({
+      code: "custom",
+      message: "must be valid Base64",
+    });
+    return;
+  }
+
+  const normalizedInput = value.replace(/=+$/, "");
+  const normalizedDecoded = decoded.toString("base64").replace(/=+$/, "");
+
+  if (normalizedInput !== normalizedDecoded) {
+    ctx.addIssue({
+      code: "custom",
+      message: "must be valid Base64",
+    });
+    return;
+  }
+
+  if (decoded.length !== 32) {
+    ctx.addIssue({
+      code: "custom",
+      message: "must decode to exactly 32 bytes",
+    });
+  }
+});
+
 const schema = z
   .object({
     NODE_ENV: z
@@ -44,7 +75,7 @@ const schema = z
     DATABASE_TENANT_URL: z.string().min(1),
     AMIGO_TENANT_PASSWORD: z.string().min(32).optional(),
     REDIS_URL: z.string().min(1),
-    CREDENTIAL_ENCRYPTION_KEY: z.string().min(1),
+    CREDENTIAL_ENCRYPTION_KEY: encryptionKey,
     JWT_SECRET: z.string().min(32),
     OAUTH_STATE_SECRET: z.string().min(32),
     COOKIE_SECURE: bool,
