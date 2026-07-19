@@ -4,16 +4,10 @@ import { systemDb } from "../db.js";
 import { AppError } from "../errors.js";
 import { encryptJson, metaAppSecretProof } from "../security.js";
 
-type InstagramBusinessAccount = {
-  id: string;
-  username?: string;
-};
-
 type Page = {
   id: string;
   name: string;
   access_token: string;
-  instagram_business_account?: InstagramBusinessAccount;
 };
 
 type MetaErrorBody = {
@@ -180,9 +174,6 @@ export function metaOAuthUrl(state: string) {
     "pages_manage_metadata",
     "pages_messaging",
   ];
-  if (env.META_ENABLE_INSTAGRAM) {
-    scopes.push("instagram_basic", "instagram_manage_messages");
-  }
 
   url.searchParams.set("client_id", credentials.appId);
   url.searchParams.set("redirect_uri", env.META_OAUTH_REDIRECT_URI);
@@ -231,8 +222,6 @@ export async function completeMetaOAuth(storeId: string, code: string) {
     );
 
   const fields = ["id", "name", "access_token"];
-  if (env.META_ENABLE_INSTAGRAM)
-    fields.push("instagram_business_account{id,username}");
   let pages = await graph<{ data: Page[] }>(
     `me/accounts?fields=${encodeURIComponent(fields.join(","))}&limit=100`,
     longTokenData.access_token,
@@ -250,7 +239,6 @@ export async function completeMetaOAuth(storeId: string, code: string) {
     );
 
   let facebook = 0;
-  let instagram = 0;
   let failed = 0;
   for (const page of pages.data) {
     const pageChannel = await save({
@@ -261,22 +249,19 @@ export async function completeMetaOAuth(storeId: string, code: string) {
       accessToken: page.access_token,
     });
 
-    let subscribedAt: Date | null = null;
-    let subscribeError: string | null = null;
     try {
       await subscribe(
         page.id,
         page.access_token,
         "messages,messaging_postbacks,message_echoes",
       );
-      subscribedAt = new Date();
       await systemDb.channel.update({
         where: { id: pageChannel.id },
-        data: { webhookSubscribedAt: subscribedAt },
+        data: { webhookSubscribedAt: new Date() },
       });
       facebook++;
     } catch (error) {
-      subscribeError =
+      const subscribeError =
         error instanceof Error ? error.message : "subscribe failed";
       await systemDb.channel.update({
         where: { id: pageChannel.id },
@@ -284,36 +269,14 @@ export async function completeMetaOAuth(storeId: string, code: string) {
       });
       failed++;
     }
-
-    const account = page.instagram_business_account;
-    if (env.META_ENABLE_INSTAGRAM && account) {
-      const instagramChannel = await save({
-        storeId,
-        type: "INSTAGRAM",
-        externalAccountId: account.id,
-        externalBusinessId: page.id,
-        name: account.username
-          ? `@${account.username}`
-          : `${page.name} Instagram`,
-        accessToken: page.access_token,
-      });
-      await systemDb.channel.update({
-        where: { id: instagramChannel.id },
-        data: subscribedAt
-          ? { webhookSubscribedAt: subscribedAt }
-          : { status: "ERROR", lastError: subscribeError },
-      });
-      if (subscribedAt) instagram++;
-      else failed++;
-    }
   }
 
-  if (!facebook && !instagram && failed)
+  if (!facebook && failed)
     throw new AppError(
       502,
       "META_SUBSCRIBE_ERROR",
       "تم العثور على الصفحة لكن تعذر تفعيل Webhook عليها",
     );
 
-  return { facebook, instagram };
+  return { facebook, instagram: 0 };
 }
