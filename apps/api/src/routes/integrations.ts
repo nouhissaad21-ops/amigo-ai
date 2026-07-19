@@ -11,22 +11,31 @@ import { AppError } from "../errors.js";
 import { cacheRedis } from "../queues.js";
 import { randomToken } from "../security.js";
 import { completeMetaOAuth, metaOAuthUrl } from "../services/meta.js";
+
 export const integrationsRouter = Router();
+
+integrationsRouter.get("/meta/status", authenticate, (_req, res) => {
+  res.json({
+    configured: Boolean(env.META_APP_ID && env.META_APP_SECRET),
+    instagramEnabled: env.META_ENABLE_INSTAGRAM,
+  });
+});
+
 integrationsRouter.get(
   "/meta/start",
   authenticate,
   requireRole("ADMIN"),
   async (req, res) => {
-    const a = req.auth!,
-      nonce = randomToken(20),
-      state = await signOAuthState({
-        userId: a.userId,
-        storeId: a.storeId,
-        nonce,
-      });
+    const auth = req.auth!;
+    const nonce = randomToken(20);
+    const state = await signOAuthState({
+      userId: auth.userId,
+      storeId: auth.storeId,
+      nonce,
+    });
     await cacheRedis.set(
       `oauth:meta:${nonce}`,
-      `${a.userId}:${a.storeId}`,
+      `${auth.userId}:${auth.storeId}`,
       "EX",
       600,
       "NX",
@@ -34,17 +43,26 @@ integrationsRouter.get(
     res.json({ url: metaOAuthUrl(state) });
   },
 );
+
 integrationsRouter.get("/meta/callback", async (req, res) => {
-  const code = typeof req.query.code === "string" ? req.query.code : undefined,
-    t = typeof req.query.state === "string" ? req.query.state : undefined;
-  if (!code || !t)
-    throw new AppError(400, "MISSING_OAUTH_PARAMS", "بيانات الربط ناقصة");
-  const s = await verifyOAuthState(t),
-    nonce = await cacheRedis.getdel(`oauth:meta:${s.nonce}`);
-  if (nonce !== `${s.userId}:${s.storeId}`)
+  const code = typeof req.query.code === "string" ? req.query.code : undefined;
+  const stateToken =
+    typeof req.query.state === "string" ? req.query.state : undefined;
+  const providerError =
+    typeof req.query.error === "string" ? req.query.error : undefined;
+
+  if (!stateToken)
+    throw new AppError(400, "MISSING_OAUTH_STATE", "بيانات الربط ناقصة");
+
+  const state = await verifyOAuthState(stateToken);
+  const nonce = await cacheRedis.getdel(`oauth:meta:${state.nonce}`);
+  if (nonce !== `${state.userId}:${state.storeId}`)
     throw new AppError(401, "OAUTH_REPLAYED", "الرابط منتهي");
+
   const membership = await systemDb.storeMembership.findUnique({
-    where: { storeId_userId: { storeId: s.storeId, userId: s.userId } },
+    where: {
+      storeId_userId: { storeId: state.storeId, userId: state.userId },
+    },
     include: { store: { select: { isActive: true, deletedAt: true } } },
   });
   if (
@@ -55,15 +73,26 @@ integrationsRouter.get("/meta/callback", async (req, res) => {
   ) {
     throw new AppError(403, "OAUTH_FORBIDDEN", "صلاحية ربط القناة ملغاة");
   }
-  const u = new URL("/dashboard/channels", env.WEB_ORIGIN);
-  try {
-    const r = await completeMetaOAuth(s.storeId, code);
-    u.searchParams.set("meta", "connected");
-    u.searchParams.set("facebook", String(r.facebook));
-    u.searchParams.set("instagram", String(r.instagram));
-  } catch (e) {
-    u.searchParams.set("meta", "error");
-    u.searchParams.set("reason", e instanceof AppError ? e.code : "UNKNOWN");
+
+  const redirect = new URL("/dashboard/channels", env.WEB_ORIGIN);
+  if (providerError || !code) {
+    redirect.searchParams.set("meta", "error");
+    redirect.searchParams.set("reason", "META_OAUTH_DENIED");
+    res.redirect(303, redirect.toString());
+    return;
   }
-  res.redirect(303, u.toString());
+
+  try {
+    const result = await completeMetaOAuth(state.storeId, code);
+    redirect.searchParams.set("meta", "connected");
+    redirect.searchParams.set("facebook", String(result.facebook));
+    redirect.searchParams.set("instagram", String(result.instagram));
+  } catch (error) {
+    redirect.searchParams.set("meta", "error");
+    redirect.searchParams.set(
+      "reason",
+      error instanceof AppError ? error.code : "UNKNOWN",
+    );
+  }
+  res.redirect(303, redirect.toString());
 });

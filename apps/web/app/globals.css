@@ -93,6 +93,66 @@ button:disabled {
   mask-image: linear-gradient(to left, black, transparent 65%);
 }
 
+.landing-hero {
+  background:
+    radial-gradient(
+      circle at 12% 18%,
+      rgba(34, 211, 238, 0.13),
+      transparent 25rem
+    ),
+    radial-gradient(
+      circle at 82% 55%,
+      rgba(38, 167, 104, 0.16),
+      transparent 30rem
+    );
+}
+
+.landing-hero::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  opacity: 0.35;
+  pointer-events: none;
+  background-image: radial-gradient(#94a3b8 0.65px, transparent 0.65px);
+  background-size: 22px 22px;
+  mask-image: linear-gradient(to bottom, black, transparent 78%);
+}
+
+.auth-shell {
+  background:
+    radial-gradient(
+      circle at 15% 12%,
+      rgba(38, 167, 104, 0.08),
+      transparent 24rem
+    ),
+    #f8faf9;
+}
+
+.auth-aside {
+  background:
+    radial-gradient(
+      circle at 18% 18%,
+      rgba(34, 211, 238, 0.2),
+      transparent 24rem
+    ),
+    radial-gradient(
+      circle at 88% 88%,
+      rgba(38, 167, 104, 0.28),
+      transparent 28rem
+    ),
+    linear-gradient(145deg, #101827 0%, #12352c 100%);
+}
+
+.auth-aside::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  opacity: 0.12;
+  background-image: radial-gradient(white 0.7px, transparent 0.7px);
+  background-size: 20px 20px;
+  mask-image: linear-gradient(135deg, black, transparent 75%);
+}
+
 @layer components {
   .card {
     @apply rounded-3xl border border-slate-200/70 bg-white shadow-card;
@@ -134,5 +194,9 @@ button:disabled {
 @media (max-width: 640px) {
   .dashboard-hero {
     border-radius: 1.5rem;
+  }
+
+  .landing-hero::before {
+    opacity: 0.18;
   }
 }

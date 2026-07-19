@@ -3,11 +3,23 @@ import { env } from "../config.js";
 import { systemDb } from "../db.js";
 import { AppError } from "../errors.js";
 import { encryptJson, metaAppSecretProof } from "../security.js";
+
+type InstagramBusinessAccount = {
+  id: string;
+  username?: string;
+};
+
 type Page = {
   id: string;
   name: string;
   access_token: string;
+  instagram_business_account?: InstagramBusinessAccount;
 };
+
+type MetaErrorBody = {
+  error?: { message?: string; code?: number; type?: string };
+};
+
 function metaCredentials() {
   if (!env.META_APP_ID || !env.META_APP_SECRET)
     throw new AppError(
@@ -17,37 +29,41 @@ function metaCredentials() {
     );
   return { appId: env.META_APP_ID, appSecret: env.META_APP_SECRET };
 }
+
 async function graph<T>(path: string, token?: string): Promise<T> {
-  const u = new URL(
+  const url = new URL(
     `https://graph.facebook.com/${env.META_GRAPH_VERSION}/${path}`,
   );
-  if (token) u.searchParams.set("appsecret_proof", metaAppSecretProof(token));
-  const r = await fetch(u, {
-      headers: token ? { authorization: `Bearer ${token}` } : {},
-    }),
-    d = (await r.json()) as T & { error?: { message?: string } };
-  if (!r.ok || d.error)
+  if (token) url.searchParams.set("appsecret_proof", metaAppSecretProof(token));
+
+  const response = await fetch(url, {
+    headers: token ? { authorization: `Bearer ${token}` } : {},
+  });
+  const data = (await response.json()) as T & MetaErrorBody;
+  if (!response.ok || data.error)
     throw new AppError(
       502,
       "META_API_ERROR",
-      d.error?.message ?? "Meta رفضت الطلب",
+      data.error?.message ?? "Meta رفضت الطلب",
     );
-  return d;
+  return data;
 }
+
 async function subscribe(id: string, token: string, fields: string) {
-  const u = new URL(
+  const url = new URL(
     `https://graph.facebook.com/${env.META_GRAPH_VERSION}/${id}/subscribed_apps`,
   );
-  u.searchParams.set("subscribed_fields", fields);
-  u.searchParams.set("appsecret_proof", metaAppSecretProof(token));
-  const r = await fetch(u, {
+  url.searchParams.set("subscribed_fields", fields);
+  url.searchParams.set("appsecret_proof", metaAppSecretProof(token));
+  const response = await fetch(url, {
     method: "POST",
     headers: { authorization: `Bearer ${token}` },
   });
-  if (!r.ok)
+  if (!response.ok)
     throw new AppError(502, "META_SUBSCRIBE_ERROR", "فشل Webhook subscription");
 }
-async function save(x: {
+
+async function save(input: {
   storeId: string;
   type: ChannelType;
   externalAccountId: string;
@@ -58,20 +74,21 @@ async function save(x: {
   const old = await systemDb.channel.findUnique({
     where: {
       type_externalAccountId: {
-        type: x.type,
-        externalAccountId: x.externalAccountId,
+        type: input.type,
+        externalAccountId: input.externalAccountId,
       },
     },
   });
-  if (old && old.storeId !== x.storeId)
+  if (old && old.storeId !== input.storeId)
     throw new AppError(409, "CHANNEL_ALREADY_LINKED", "الحساب مربوط بمتجر آخر");
+
   const data = {
-    storeId: x.storeId,
-    type: x.type,
-    externalAccountId: x.externalAccountId,
-    externalBusinessId: x.externalBusinessId ?? null,
-    name: x.name,
-    credentialsEncrypted: encryptJson({ accessToken: x.accessToken }),
+    storeId: input.storeId,
+    type: input.type,
+    externalAccountId: input.externalAccountId,
+    externalBusinessId: input.externalBusinessId ?? null,
+    name: input.name,
+    credentialsEncrypted: encryptJson({ accessToken: input.accessToken }),
     status: "CONNECTED" as const,
     lastConnectedAt: new Date(),
     lastError: null,
@@ -80,77 +97,149 @@ async function save(x: {
     ? systemDb.channel.update({ where: { id: old.id }, data })
     : systemDb.channel.create({ data });
 }
+
 export function metaOAuthUrl(state: string) {
   const credentials = metaCredentials();
-  const u = new URL(
+  const url = new URL(
     `https://www.facebook.com/${env.META_GRAPH_VERSION}/dialog/oauth`,
   );
-  u.searchParams.set("client_id", credentials.appId);
-  u.searchParams.set("redirect_uri", env.META_OAUTH_REDIRECT_URI);
-  u.searchParams.set("state", state);
-  u.searchParams.set(
-    "scope",
-    [
-      "pages_show_list",
-      "pages_manage_metadata",
-      "pages_messaging",
-    ].join(","),
-  );
-  return u.toString();
+  const scopes = [
+    "pages_show_list",
+    "pages_manage_metadata",
+    "pages_messaging",
+  ];
+  if (env.META_ENABLE_INSTAGRAM) {
+    scopes.push(
+      "pages_read_engagement",
+      "instagram_basic",
+      "instagram_manage_messages",
+    );
+  }
+
+  url.searchParams.set("client_id", credentials.appId);
+  url.searchParams.set("redirect_uri", env.META_OAUTH_REDIRECT_URI);
+  url.searchParams.set("state", state);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("scope", scopes.join(","));
+  return url.toString();
 }
+
 export async function completeMetaOAuth(storeId: string, code: string) {
   const credentials = metaCredentials();
-  const a = new URL(
+  const exchangeUrl = new URL(
     `https://graph.facebook.com/${env.META_GRAPH_VERSION}/oauth/access_token`,
   );
-  a.searchParams.set("client_id", credentials.appId);
-  a.searchParams.set("client_secret", credentials.appSecret);
-  a.searchParams.set("redirect_uri", env.META_OAUTH_REDIRECT_URI);
-  a.searchParams.set("code", code);
-  const ar = await fetch(a),
-    ad = (await ar.json()) as { access_token?: string };
-  if (!ar.ok || !ad.access_token)
-    throw new AppError(400, "META_CODE_EXCHANGE_FAILED", "فشل تبديل code");
-  const l = new URL(a);
-  l.searchParams.delete("redirect_uri");
-  l.searchParams.delete("code");
-  l.searchParams.set("grant_type", "fb_exchange_token");
-  l.searchParams.set("fb_exchange_token", ad.access_token);
-  const lr = await fetch(l),
-    ld = (await lr.json()) as { access_token?: string };
-  if (!lr.ok || !ld.access_token)
-    throw new AppError(400, "META_LONG_TOKEN_FAILED", "فشل Long-lived token");
+  exchangeUrl.searchParams.set("client_id", credentials.appId);
+  exchangeUrl.searchParams.set("client_secret", credentials.appSecret);
+  exchangeUrl.searchParams.set("redirect_uri", env.META_OAUTH_REDIRECT_URI);
+  exchangeUrl.searchParams.set("code", code);
+
+  const exchangeResponse = await fetch(exchangeUrl);
+  const exchangeData = (await exchangeResponse.json()) as {
+    access_token?: string;
+  } & MetaErrorBody;
+  if (!exchangeResponse.ok || !exchangeData.access_token)
+    throw new AppError(
+      400,
+      "META_CODE_EXCHANGE_FAILED",
+      exchangeData.error?.message ?? "فشل تبديل code",
+    );
+
+  const longTokenUrl = new URL(exchangeUrl);
+  longTokenUrl.searchParams.delete("redirect_uri");
+  longTokenUrl.searchParams.delete("code");
+  longTokenUrl.searchParams.set("grant_type", "fb_exchange_token");
+  longTokenUrl.searchParams.set("fb_exchange_token", exchangeData.access_token);
+  const longTokenResponse = await fetch(longTokenUrl);
+  const longTokenData = (await longTokenResponse.json()) as {
+    access_token?: string;
+  } & MetaErrorBody;
+  if (!longTokenResponse.ok || !longTokenData.access_token)
+    throw new AppError(
+      400,
+      "META_LONG_TOKEN_FAILED",
+      longTokenData.error?.message ?? "فشل Long-lived token",
+    );
+
+  const fields = ["id", "name", "access_token"];
+  if (env.META_ENABLE_INSTAGRAM)
+    fields.push("instagram_business_account{id,username}");
   const pages = await graph<{ data: Page[] }>(
-    `me/accounts?fields=${encodeURIComponent("id,name,access_token")}&limit=100`,
-    ld.access_token,
+    `me/accounts?fields=${encodeURIComponent(fields.join(","))}&limit=100`,
+    longTokenData.access_token,
   );
-  let facebook = 0,
-    instagram = 0;
-  for (const p of pages.data) {
-    const ch = await save({
+  if (!pages.data.length)
+    throw new AppError(
+      422,
+      "META_NO_PAGES",
+      "هذا الحساب لا يدير أي صفحة Facebook متاحة للتطبيق",
+    );
+
+  let facebook = 0;
+  let instagram = 0;
+  let failed = 0;
+  for (const page of pages.data) {
+    const pageChannel = await save({
       storeId,
       type: "FACEBOOK",
-      externalAccountId: p.id,
-      name: p.name,
-      accessToken: p.access_token,
+      externalAccountId: page.id,
+      name: page.name,
+      accessToken: page.access_token,
     });
+
+    let subscribedAt: Date | null = null;
+    let subscribeError: string | null = null;
     try {
       await subscribe(
-        p.id,
-        p.access_token,
+        page.id,
+        page.access_token,
         "messages,messaging_postbacks,message_echoes",
       );
+      subscribedAt = new Date();
       await systemDb.channel.update({
-        where: { id: ch.id },
-        data: { webhookSubscribedAt: new Date() },
+        where: { id: pageChannel.id },
+        data: { webhookSubscribedAt: subscribedAt },
       });
-    } catch (e) {
+      facebook++;
+    } catch (error) {
+      subscribeError =
+        error instanceof Error ? error.message : "subscribe failed";
       await systemDb.channel.update({
-        where: { id: ch.id },
-        data: { status: "ERROR", lastError: (e as Error).message },
+        where: { id: pageChannel.id },
+        data: { status: "ERROR", lastError: subscribeError },
       });
+      failed++;
     }
-    facebook++;
+
+    const account = page.instagram_business_account;
+    if (env.META_ENABLE_INSTAGRAM && account) {
+      const instagramChannel = await save({
+        storeId,
+        type: "INSTAGRAM",
+        externalAccountId: account.id,
+        externalBusinessId: page.id,
+        name: account.username
+          ? `@${account.username}`
+          : `${page.name} Instagram`,
+        accessToken: page.access_token,
+      });
+      await systemDb.channel.update({
+        where: { id: instagramChannel.id },
+        data: subscribedAt
+          ? { webhookSubscribedAt: subscribedAt }
+          : { status: "ERROR", lastError: subscribeError },
+      });
+      if (subscribedAt) instagram++;
+      else failed++;
+    }
   }
+
+  if (!facebook && !instagram && failed)
+    throw new AppError(
+      502,
+      "META_SUBSCRIBE_ERROR",
+      "تم العثور على الصفحة لكن تعذر تفعيل Webhook عليها",
+    );
+
   return { facebook, instagram };
 }

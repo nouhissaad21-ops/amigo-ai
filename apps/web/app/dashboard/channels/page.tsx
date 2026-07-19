@@ -28,22 +28,48 @@ const statusLabel: Record<Channel["status"], string> = {
   ERROR: "يحتاج تدخّل",
 };
 
+type MetaCapabilities = {
+  configured: boolean;
+  instagramEnabled: boolean;
+};
+
+const metaErrorMessage: Record<string, string> = {
+  META_NOT_CONFIGURED:
+    "إعداد Meta غير مكتمل عند مالك المنصة. يلزم App ID وApp Secret مرة واحدة فقط.",
+  META_OAUTH_DENIED: "تم إلغاء الربط قبل منح الصلاحيات.",
+  META_CODE_EXCHANGE_FAILED:
+    "Meta رفضت إكمال جلسة الربط. أعد المحاولة من حساب يدير الصفحة.",
+  META_LONG_TOKEN_FAILED: "تعذر إنشاء رمز وصول طويل المدة.",
+  META_API_ERROR: "Meta لم تسمح بقراءة الصفحات لهذا الحساب.",
+  META_NO_PAGES:
+    "لم نجد صفحة Facebook يديرها هذا الحساب. تأكد أنك مسؤول في الصفحة ثم أعد المحاولة.",
+  META_SUBSCRIBE_ERROR:
+    "تم العثور على الصفحة لكن Meta رفضت تفعيل استقبال الرسائل. راجع صلاحية pages_messaging وWebhook في تطبيق Meta.",
+  OAUTH_REPLAYED: "انتهت صلاحية رابط الربط. اضغط ربط من جديد.",
+  UNKNOWN: "حدث خطأ غير متوقع أثناء الربط.",
+};
+
 export default function Channels() {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [cloudForm, setCloudForm] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(true);
+  const [metaCapabilities, setMetaCapabilities] = useState<MetaCapabilities>();
   const [connecting, setConnecting] = useState<"meta" | "cloud" | "qr" | "">(
     "",
   );
 
   const load = useCallback(async () => {
     try {
-      const result = await api.get<{ channels: Channel[] }>(
-        "/api/dashboard/channels",
-      );
+      const [result, capabilities] = await Promise.all([
+        api.get<{ channels: Channel[] }>("/api/dashboard/channels"),
+        api
+          .get<MetaCapabilities>("/api/integrations/meta/status")
+          .catch(() => undefined),
+      ]);
       setChannels(result.channels);
+      if (capabilities) setMetaCapabilities(capabilities);
     } catch (reason) {
       setError((reason as Error).message);
     } finally {
@@ -62,7 +88,8 @@ export default function Channels() {
       );
       window.history.replaceState({}, "", "/dashboard/channels/");
     } else if (params.get("meta") === "error") {
-      setError(`تعذر إكمال ربط Meta (${params.get("reason") ?? "UNKNOWN"}).`);
+      const reason = params.get("reason") ?? "UNKNOWN";
+      setError(metaErrorMessage[reason] ?? metaErrorMessage.UNKNOWN);
       window.history.replaceState({}, "", "/dashboard/channels/");
     }
   }, [load]);
@@ -157,8 +184,12 @@ export default function Channels() {
       tint: "from-blue-50 to-white",
       accounts: grouped.facebook,
       action: connectMeta,
-      actionLabel: "ربط Facebook",
-      disabled: false,
+      actionLabel:
+        metaCapabilities?.configured === false
+          ? "إعداد Meta غير مكتمل"
+          : "ربط Facebook",
+      disabled: metaCapabilities?.configured === false,
+      note: "التاجر يوافق مرة واحدة من نافذة Meta الرسمية.",
     },
     {
       key: "instagram",
@@ -170,8 +201,13 @@ export default function Channels() {
       tint: "from-pink-50 to-white",
       accounts: grouped.instagram,
       action: connectMeta,
-      actionLabel: "الربط عبر Meta",
-      disabled: false,
+      actionLabel: metaCapabilities?.instagramEnabled
+        ? "ربط Instagram"
+        : "بانتظار تفعيل Instagram",
+      disabled: !metaCapabilities?.instagramEnabled,
+      note: metaCapabilities?.instagramEnabled
+        ? "سيظهر الحساب التجاري المتصل بصفحة Facebook تلقائياً."
+        : "مالك المنصة يفعّل Instagram API ومراجعة Meta مرة واحدة؛ بعدها التاجر يربطه بضغطة.",
     },
     {
       key: "whatsapp",
@@ -184,6 +220,7 @@ export default function Channels() {
       action: () => setCloudForm(true),
       actionLabel: "ربط WhatsApp",
       disabled: false,
+      note: "Cloud API الرسمي مناسب للاستضافة ويعمل دون إبقاء هاتف مفتوح.",
     },
   ] as const;
 
@@ -254,7 +291,7 @@ export default function Channels() {
             >
               <div className="flex items-start justify-between gap-4">
                 <span
-                  className={`grid size-13 place-items-center rounded-2xl shadow-sm ${provider.iconClass}`}
+                  className={`grid size-12 place-items-center rounded-2xl shadow-sm ${provider.iconClass}`}
                 >
                   <Icon size={25} />
                 </span>
@@ -272,6 +309,9 @@ export default function Channels() {
               </h2>
               <p className="mt-2 min-h-12 text-sm leading-6 text-slate-500">
                 {provider.description}
+              </p>
+              <p className="mt-3 min-h-10 rounded-2xl bg-white/70 px-3 py-2 text-[10px] font-bold leading-5 text-slate-400">
+                {provider.note}
               </p>
 
               <div className="mt-5 space-y-2">
