@@ -72,4 +72,4 @@ services:
       - key: META_GRAPH_VERSION
         value: v25.0
       - key: META_ENABLE_INSTAGRAM
-        value: false
+        value: true
