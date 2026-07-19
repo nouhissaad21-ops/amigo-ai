@@ -13,6 +13,8 @@ type InstagramTokenResponse = InstagramErrorBody & {
   access_token?: string;
   user_id?: string | number;
   permissions?: string[];
+  token_type?: string;
+  expires_in?: number;
 };
 
 type InstagramProfile = InstagramErrorBody & {
@@ -46,6 +48,58 @@ async function responseJson<T>(response: Response): Promise<T & InstagramErrorBo
   }
 }
 
+function instagramErrorMessage(data: InstagramErrorBody) {
+  return data.error?.message ?? data.error_message ?? "Instagram رفضت الطلب";
+}
+
+async function exchangeLongLivedToken(
+  shortToken: string,
+  appSecret: string,
+): Promise<string> {
+  const params = {
+    grant_type: "ig_exchange_token",
+    client_secret: appSecret,
+    access_token: shortToken,
+  };
+  const endpoints = [
+    `https://graph.instagram.com/${env.META_GRAPH_VERSION}/access_token`,
+    "https://graph.instagram.com/access_token",
+  ];
+  const failures: string[] = [];
+
+  for (const endpoint of endpoints) {
+    const postResponse = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${shortToken}`,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams(params),
+    });
+    const postData = await responseJson<InstagramTokenResponse>(postResponse);
+    if (postResponse.ok && postData.access_token) return postData.access_token;
+    failures.push(`POST ${instagramErrorMessage(postData)}`);
+
+    const getUrl = new URL(endpoint);
+    for (const [key, value] of Object.entries(params))
+      getUrl.searchParams.set(key, value);
+    const getResponse = await fetch(getUrl, {
+      headers: { authorization: `Bearer ${shortToken}` },
+    });
+    const getData = await responseJson<InstagramTokenResponse>(getResponse);
+    if (getResponse.ok && getData.access_token) return getData.access_token;
+    failures.push(`GET ${instagramErrorMessage(getData)}`);
+  }
+
+  throw new AppError(
+    400,
+    "INSTAGRAM_LONG_TOKEN_FAILED",
+    failures.find((message) => !message.includes("method type")) ??
+      failures[0] ??
+      "تعذر إنشاء رمز Instagram طويل المدة",
+  );
+}
+
 async function instagramGraph<T>(
   path: string,
   token: string,
@@ -66,7 +120,7 @@ async function instagramGraph<T>(
     throw new AppError(
       502,
       "INSTAGRAM_API_ERROR",
-      data.error?.message ?? data.error_message ?? "Instagram رفضت الطلب",
+      instagramErrorMessage(data),
     );
   return data;
 }
@@ -157,35 +211,13 @@ export async function completeInstagramOAuth(storeId: string, code: string) {
     throw new AppError(
       400,
       "INSTAGRAM_CODE_EXCHANGE_FAILED",
-      shortData.error?.message ??
-        shortData.error_message ??
-        "تعذر إكمال تسجيل Instagram",
+      instagramErrorMessage(shortData),
     );
 
-  const longBody = new URLSearchParams({
-    grant_type: "ig_exchange_token",
-    client_secret: credentials.appSecret,
-    access_token: shortData.access_token,
-  });
-  const longResponse = await fetch(
-    "https://graph.instagram.com/access_token",
-    {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: longBody,
-    },
+  const accessToken = await exchangeLongLivedToken(
+    shortData.access_token,
+    credentials.appSecret,
   );
-  const longData = await responseJson<InstagramTokenResponse>(longResponse);
-  if (!longResponse.ok || !longData.access_token)
-    throw new AppError(
-      400,
-      "INSTAGRAM_LONG_TOKEN_FAILED",
-      longData.error?.message ??
-        longData.error_message ??
-        "تعذر إنشاء رمز Instagram طويل المدة",
-    );
-
-  const accessToken = longData.access_token;
   const profile = await instagramGraph<InstagramProfile>(
     "me?fields=id,username",
     accessToken,
