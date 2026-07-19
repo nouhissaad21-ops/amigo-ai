@@ -26,37 +26,181 @@ import { cacheRedis } from "../queues.js";
 import { env } from "../config.js";
 export const dashboardRouter = Router();
 dashboardRouter.use(authenticate);
+
+const DAY_MS = 86_400_000;
+const ALGIERS_OFFSET_MS = 60 * 60 * 1000;
+
+function startOfAlgiersDay(date = new Date()) {
+  const shifted = new Date(date.getTime() + ALGIERS_OFFSET_MS);
+  shifted.setUTCHours(0, 0, 0, 0);
+  return new Date(shifted.getTime() - ALGIERS_OFFSET_MS);
+}
+
+function algiersDateKey(date: Date) {
+  return new Date(date.getTime() + ALGIERS_OFFSET_MS)
+    .toISOString()
+    .slice(0, 10);
+}
+
 dashboardRouter.get("/stats", async (req, res) => {
   const s = req.auth!.storeId;
   res.json(
     await withTenant(s, async (tx) => {
-      const [products, channels, openOrders, todayOrders, revenue] =
-        await Promise.all([
-          tx.product.count({ where: { storeId: s, status: "ACTIVE" } }),
-          tx.channel.count({ where: { storeId: s, status: "CONNECTED" } }),
-          tx.order.count({
-            where: {
-              storeId: s,
-              status: { in: ["CAPTURED", "CONFIRMED", "PACKING"] },
+      const todayStart = startOfAlgiersDay();
+      const sevenDayStart = new Date(todayStart.getTime() - 6 * DAY_MS);
+      const thirtyDayStart = new Date(todayStart.getTime() - 29 * DAY_MS);
+      type DailyAggregate = {
+        day: string;
+        orders: number;
+        revenue: Prisma.Decimal;
+      };
+
+      const [
+        products,
+        channels,
+        openOrders,
+        todayOrders,
+        revenue,
+        dailyAggregates,
+        statusGroups,
+        channelOrders,
+        channelMessages,
+        channelDirectory,
+        recentOrders,
+      ] = await Promise.all([
+        tx.product.count({ where: { storeId: s, status: "ACTIVE" } }),
+        tx.channel.count({ where: { storeId: s, status: "CONNECTED" } }),
+        tx.order.count({
+          where: {
+            storeId: s,
+            status: { in: ["CAPTURED", "CONFIRMED", "PACKING"] },
+          },
+        }),
+        tx.order.count({
+          where: {
+            storeId: s,
+            createdAt: { gte: todayStart },
+          },
+        }),
+        tx.order.aggregate({
+          where: { storeId: s, status: { notIn: ["CANCELED", "RETURNED"] } },
+          _sum: { totalAmount: true },
+        }),
+        tx.$queryRaw<DailyAggregate[]>`
+            SELECT
+              to_char("createdAt" AT TIME ZONE 'Africa/Algiers', 'YYYY-MM-DD') AS day,
+              COUNT(*)::int AS orders,
+              COALESCE(
+                SUM(
+                  CASE
+                    WHEN status NOT IN ('CANCELED', 'RETURNED') THEN "totalAmount"
+                    ELSE 0
+                  END
+                ),
+                0
+              ) AS revenue
+            FROM "Order"
+            WHERE "storeId" = ${s}::uuid
+              AND "createdAt" >= ${sevenDayStart}
+            GROUP BY 1
+            ORDER BY 1
+          `,
+        tx.order.groupBy({
+          by: ["status"],
+          where: { storeId: s },
+          _count: { _all: true },
+        }),
+        tx.order.groupBy({
+          by: ["channelId"],
+          where: { storeId: s, createdAt: { gte: thirtyDayStart } },
+          _count: { _all: true },
+          _sum: { totalAmount: true },
+        }),
+        tx.message.groupBy({
+          by: ["channelId"],
+          where: {
+            storeId: s,
+            direction: "INBOUND",
+            createdAt: { gte: thirtyDayStart },
+          },
+          _count: { _all: true },
+        }),
+        tx.channel.findMany({
+          where: { storeId: s },
+          select: { id: true, name: true, type: true, status: true },
+          orderBy: { createdAt: "asc" },
+        }),
+        tx.order.findMany({
+          where: { storeId: s },
+          select: {
+            id: true,
+            orderNumber: true,
+            fullName: true,
+            wilayaName: true,
+            totalAmount: true,
+            status: true,
+            createdAt: true,
+            channel: { select: { name: true, type: true } },
+            items: {
+              select: { productNameSnapshot: true, quantity: true },
+              take: 2,
             },
-          }),
-          tx.order.count({
-            where: {
-              storeId: s,
-              createdAt: { gte: new Date(new Date().setHours(0, 0, 0, 0)) },
-            },
-          }),
-          tx.order.aggregate({
-            where: { storeId: s, status: { notIn: ["CANCELED", "RETURNED"] } },
-            _sum: { totalAmount: true },
-          }),
-        ]);
+          },
+          orderBy: { createdAt: "desc" },
+          take: 5,
+        }),
+      ]);
+
+      const dailyByDate = new Map(dailyAggregates.map((row) => [row.day, row]));
+      const daily = Array.from({ length: 7 }, (_, index) => {
+        const date = new Date(sevenDayStart.getTime() + index * DAY_MS);
+        const key = algiersDateKey(date);
+        const row = dailyByDate.get(key);
+        return {
+          date: key,
+          orders: row?.orders ?? 0,
+          revenue: row?.revenue.toFixed(2) ?? "0.00",
+        };
+      });
+      const ordersByChannel = new Map(
+        channelOrders.map((row) => [row.channelId, row]),
+      );
+      const messagesByChannel = new Map(
+        channelMessages.map((row) => [row.channelId, row._count._all]),
+      );
+
       return {
         products,
         channels,
         openOrders,
         todayOrders,
         revenue: revenue._sum.totalAmount?.toFixed(2) ?? "0.00",
+        analytics: {
+          daily,
+          orderStatuses: statusGroups.map((row) => ({
+            status: row.status,
+            count: row._count._all,
+          })),
+          channels: channelDirectory.map((channel) => {
+            const orderData = ordersByChannel.get(channel.id);
+            const orders = orderData?._count._all ?? 0;
+            const messages = messagesByChannel.get(channel.id) ?? 0;
+            return {
+              id: channel.id,
+              name: channel.name,
+              type: channel.type,
+              status: channel.status,
+              messages,
+              orders,
+              revenue: orderData?._sum.totalAmount?.toFixed(2) ?? "0.00",
+              conversionRate:
+                messages > 0
+                  ? Math.min(100, Math.round((orders / messages) * 100))
+                  : 0,
+            };
+          }),
+          recentOrders,
+        },
       };
     }),
   );
