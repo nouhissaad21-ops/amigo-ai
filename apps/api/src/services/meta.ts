@@ -20,6 +20,23 @@ type MetaErrorBody = {
   error?: { message?: string; code?: number; type?: string };
 };
 
+type MetaDebugTokenBody = {
+  data?: {
+    is_valid?: boolean;
+    granular_scopes?: Array<{
+      scope?: string;
+      target_ids?: string[];
+    }>;
+  };
+};
+
+const pagePermissionScopes = new Set([
+  "pages_show_list",
+  "pages_read_engagement",
+  "pages_manage_metadata",
+  "pages_messaging",
+]);
+
 function metaCredentials() {
   if (!env.META_APP_ID || !env.META_APP_SECRET)
     throw new AppError(
@@ -47,6 +64,60 @@ async function graph<T>(path: string, token?: string): Promise<T> {
       data.error?.message ?? "Meta رفضت الطلب",
     );
   return data;
+}
+
+async function pagesFromTokenTargets(
+  token: string,
+  fields: string[],
+): Promise<Page[]> {
+  const credentials = metaCredentials();
+  const url = new URL(
+    `https://graph.facebook.com/${env.META_GRAPH_VERSION}/debug_token`,
+  );
+  url.searchParams.set("input_token", token);
+  url.searchParams.set(
+    "access_token",
+    `${credentials.appId}|${credentials.appSecret}`,
+  );
+
+  const response = await fetch(url);
+  const data = (await response.json()) as MetaDebugTokenBody & MetaErrorBody;
+  if (!response.ok || data.error)
+    throw new AppError(
+      502,
+      "META_TOKEN_DEBUG_ERROR",
+      data.error?.message ?? "تعذر فحص صلاحيات Meta",
+    );
+  if (data.data?.is_valid === false)
+    throw new AppError(400, "META_TOKEN_INVALID", "رمز Meta غير صالح");
+
+  const pageIds = [
+    ...new Set(
+      (data.data?.granular_scopes ?? [])
+        .filter(
+          ({ scope, target_ids }) =>
+            typeof scope === "string" &&
+            pagePermissionScopes.has(scope) &&
+            Array.isArray(target_ids),
+        )
+        .flatMap(({ target_ids }) => target_ids ?? []),
+    ),
+  ];
+
+  const candidates = await Promise.allSettled(
+    pageIds.map((pageId) =>
+      graph<Page>(
+        `${pageId}?fields=${encodeURIComponent(fields.join(","))}`,
+        token,
+      ),
+    ),
+  );
+
+  return candidates.flatMap((result) =>
+    result.status === "fulfilled" && result.value.access_token
+      ? [result.value]
+      : [],
+  );
 }
 
 async function subscribe(id: string, token: string, fields: string) {
@@ -162,15 +233,20 @@ export async function completeMetaOAuth(storeId: string, code: string) {
   const fields = ["id", "name", "access_token"];
   if (env.META_ENABLE_INSTAGRAM)
     fields.push("instagram_business_account{id,username}");
-  const pages = await graph<{ data: Page[] }>(
+  let pages = await graph<{ data: Page[] }>(
     `me/accounts?fields=${encodeURIComponent(fields.join(","))}&limit=100`,
     longTokenData.access_token,
   );
+  if (!pages.data.length) {
+    pages = {
+      data: await pagesFromTokenTargets(longTokenData.access_token, fields),
+    };
+  }
   if (!pages.data.length)
     throw new AppError(
       422,
       "META_NO_PAGES",
-      "Meta لم تعرض أي صفحة لهذا الحساب. عيّن الصفحة للحساب داخل Business Portfolio، ثم احذف AmiGo AI من عمليات دمج الأعمال وأعد الربط.",
+      "Meta لم تعرض أي صفحة ولم نجد صفحات ضمن صلاحيات الرمز. أعد اختيار الصفحة أثناء الربط ثم حاول مجدداً.",
     );
 
   let facebook = 0;
