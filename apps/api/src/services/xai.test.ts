@@ -177,4 +177,4 @@ describe("multilingual Chat Completions merchant agent", () => {
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
-}
+});
