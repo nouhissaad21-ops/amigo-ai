@@ -8,6 +8,8 @@ import type { NormalizedInbound } from "./inbound.js";
 
 type InstagramCredentials = {
   accessToken?: string;
+  instagramAccessToken?: string;
+  facebookPageAccessToken?: string;
   instagramUserId?: string;
   oauthUserId?: string;
   pageId?: string;
@@ -33,6 +35,7 @@ type GraphError = { error?: { message?: string; code?: number } };
 type GraphCandidate = {
   host: "instagram" | "facebook";
   accountId: string;
+  token: string;
 };
 
 const lastSuccessfulPoll = new Map<string, number>();
@@ -78,22 +81,37 @@ function accountAliases(channel: Channel, credentials: InstagramCredentials) {
 }
 
 function graphCandidates(channel: Channel, credentials: InstagramCredentials) {
-  const instagramId =
-    credentials.instagramUserId ?? channel.externalAccountId;
-  const pageId = credentials.pageId;
-  const preferred = credentials.graphHost ?? (pageId ? "facebook" : "instagram");
+  const defaultToken = credentials.accessToken;
+  const instagramToken =
+    credentials.instagramAccessToken ?? (!credentials.pageId ? defaultToken : undefined);
+  const pageToken =
+    credentials.facebookPageAccessToken ?? (credentials.pageId ? defaultToken : undefined);
+  const instagramId = credentials.instagramUserId ?? channel.externalAccountId;
   const candidates: GraphCandidate[] = [];
-  const add = (host: GraphCandidate["host"], accountId?: string | null) => {
-    if (!accountId) return;
-    if (!candidates.some((item) => item.host === host && item.accountId === accountId))
-      candidates.push({ host, accountId });
+  const add = (
+    host: GraphCandidate["host"],
+    accountId?: string | null,
+    token?: string,
+  ) => {
+    if (!accountId || !token) return;
+    if (
+      !candidates.some(
+        (item) =>
+          item.host === host &&
+          item.accountId === accountId &&
+          item.token === token,
+      )
+    )
+      candidates.push({ host, accountId, token });
   };
 
-  add(preferred, preferred === "facebook" ? pageId ?? instagramId : instagramId);
-  add("instagram", instagramId);
-  add("instagram", "me");
-  add("facebook", pageId);
-  add("facebook", instagramId);
+  if (credentials.graphHost === "facebook")
+    add("facebook", credentials.pageId ?? instagramId, pageToken);
+  else add("instagram", instagramId, instagramToken);
+  add("instagram", instagramId, instagramToken);
+  add("instagram", "me", instagramToken);
+  add("facebook", credentials.pageId, pageToken);
+  add("facebook", instagramId, pageToken);
   return candidates;
 }
 
@@ -110,7 +128,7 @@ async function listConversations(
     try {
       const result = await graphJson<{ data?: Conversation[] }>(
         url,
-        credentials.accessToken!,
+        candidate.token,
       );
       return { candidate, conversations: result.data ?? [] };
     } catch (error) {
@@ -126,13 +144,12 @@ async function listConversations(
 
 async function messageDetails(
   message: InstagramMessage,
-  token: string,
-  host: GraphCandidate["host"],
+  candidate: GraphCandidate,
 ): Promise<InstagramMessage> {
   if (message.message || message.text || !message.id) return message;
-  const url = graphUrl(host, message.id);
+  const url = graphUrl(candidate.host, message.id);
   url.searchParams.set("fields", "id,created_time,from,to,message,text");
-  return graphJson<InstagramMessage>(url, token);
+  return graphJson<InstagramMessage>(url, candidate.token);
 }
 
 function customerParticipant(
@@ -190,7 +207,8 @@ async function pollChannel(channel: Channel) {
   const credentials = decryptJson<InstagramCredentials>(
     channel.credentialsEncrypted,
   );
-  if (!credentials.accessToken) throw new Error("Instagram token is missing");
+  if (!graphCandidates(channel, credentials).length)
+    throw new Error("Instagram token is missing");
 
   const since =
     lastSuccessfulPoll.get(channel.id) ?? Date.now() - 3 * 60_000;
@@ -213,7 +231,7 @@ async function pollChannel(channel: Channel) {
     );
     const details = await graphJson<ConversationDetails>(
       detailsUrl,
-      credentials.accessToken,
+      candidate.token,
     );
     const messages = [...(details.messages?.data ?? [])].sort(
       (a, b) =>
@@ -224,11 +242,7 @@ async function pollChannel(channel: Channel) {
       if (compact.is_unsupported) continue;
       const createdAt = Date.parse(compact.created_time ?? "");
       if (Number.isFinite(createdAt) && createdAt < since - 45_000) continue;
-      const message = await messageDetails(
-        compact,
-        credentials.accessToken,
-        candidate.host,
-      );
+      const message = await messageDetails(compact, candidate);
       const customer = customerParticipant(message, aliases);
       if (!customer) continue;
       if (await persistPolledMessage(channel, message, customer)) captured++;
@@ -239,10 +253,7 @@ async function pollChannel(channel: Channel) {
   await systemDb.channel
     .update({
       where: { id: channel.id },
-      data: {
-        status: "CONNECTED",
-        lastError: null,
-      },
+      data: { status: "CONNECTED", lastError: null },
     })
     .catch(() => {});
   return captured;
