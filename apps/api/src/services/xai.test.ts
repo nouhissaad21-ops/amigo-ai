@@ -23,7 +23,31 @@ function response(body: unknown) {
   });
 }
 
-describe("AI Responses agent", () => {
+function chatText(content: string, id = "chat-1") {
+  return response({ id, choices: [{ message: { content } }] });
+}
+
+function chatTool(name: string, args: string, id = "call-1") {
+  return response({
+    id: "chat-1",
+    choices: [
+      {
+        message: {
+          content: null,
+          tool_calls: [
+            {
+              id,
+              type: "function",
+              function: { name, arguments: args },
+            },
+          ],
+        },
+      },
+    ],
+  });
+}
+
+describe("Groq Chat Completions merchant agent", () => {
   beforeEach(() => {
     createOrderFromTool.mockReset();
   });
@@ -33,18 +57,7 @@ describe("AI Responses agent", () => {
   });
 
   it("returns a regular assistant response", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      response({
-        id: "resp-1",
-        status: "completed",
-        output: [
-          {
-            type: "message",
-            content: [{ type: "output_text", text: "السعر 2000 دج" }],
-          },
-        ],
-      }),
-    );
+    const fetchMock = vi.fn().mockResolvedValue(chatText("السعر 2000 دج"));
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(runMerchantAgent(context)).resolves.toEqual({
@@ -52,13 +65,19 @@ describe("AI Responses agent", () => {
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, request] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("https://api.groq.com/openai/v1/responses");
-    expect(JSON.parse(String(request.body))).toMatchObject({
+    expect(url).toBe("https://api.groq.com/openai/v1/chat/completions");
+    const body = JSON.parse(String(request.body));
+    expect(body).toMatchObject({
       model: "llama-3.3-70b-versatile",
       tool_choice: "auto",
       parallel_tool_calls: false,
     });
-    expect(JSON.parse(String(request.body))).not.toHaveProperty("store");
+    expect(body.messages).toEqual([
+      { role: "system", content: "system" },
+      { role: "user", content: "شحال؟" },
+    ]);
+    expect(body.tools[0]).toHaveProperty("function.name", "create_order");
+    expect(body).not.toHaveProperty("store");
   });
 
   it("executes create_order and feeds its trusted result back to the model", async () => {
@@ -87,32 +106,8 @@ describe("AI Responses agent", () => {
     };
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(
-        response({
-          id: "resp-1",
-          status: "completed",
-          output: [
-            {
-              type: "function_call",
-              name: "create_order",
-              call_id: "call-1",
-              arguments: JSON.stringify(args),
-            },
-          ],
-        }),
-      )
-      .mockResolvedValueOnce(
-        response({
-          id: "resp-2",
-          status: "completed",
-          output: [
-            {
-              type: "message",
-              content: [{ type: "output_text", text: "تسجلت طلبيتك AMG-001" }],
-            },
-          ],
-        }),
-      );
+      .mockResolvedValueOnce(chatTool("create_order", JSON.stringify(args)))
+      .mockResolvedValueOnce(chatText("تسجلت طلبيتك AMG-001", "chat-2"));
     vi.stubGlobal("fetch", fetchMock);
 
     const result = await runMerchantAgent(context);
@@ -124,10 +119,18 @@ describe("AI Responses agent", () => {
       String((fetchMock.mock.calls[1] as [string, RequestInit])[1].body),
     );
     expect(secondBody.tool_choice).toBe("none");
-    const toolOutput = secondBody.input.find(
-      (item: { type?: string }) => item.type === "function_call_output",
+    const assistantCall = secondBody.messages.find(
+      (item: { role?: string; tool_calls?: unknown[] }) =>
+        item.role === "assistant" && Array.isArray(item.tool_calls),
     );
-    expect(JSON.parse(toolOutput.output)).toMatchObject({
+    expect(assistantCall.tool_calls[0]).toMatchObject({
+      id: "call-1",
+      function: { name: "create_order" },
+    });
+    const toolOutput = secondBody.messages.find(
+      (item: { role?: string }) => item.role === "tool",
+    );
+    expect(JSON.parse(toolOutput.content)).toMatchObject({
       success: true,
       order: { orderNumber: "AMG-001" },
     });
@@ -136,32 +139,8 @@ describe("AI Responses agent", () => {
   it("does not call the database for malformed tool arguments", async () => {
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(
-        response({
-          id: "resp-1",
-          status: "completed",
-          output: [
-            {
-              type: "function_call",
-              name: "create_order",
-              call_id: "call-1",
-              arguments: "not-json",
-            },
-          ],
-        }),
-      )
-      .mockResolvedValueOnce(
-        response({
-          id: "resp-2",
-          status: "completed",
-          output: [
-            {
-              type: "message",
-              content: [{ type: "output_text", text: "صححلي المعلومات" }],
-            },
-          ],
-        }),
-      );
+      .mockResolvedValueOnce(chatTool("create_order", "not-json"))
+      .mockResolvedValueOnce(chatText("صححلي المعلومات", "chat-2"));
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(runMerchantAgent(context)).resolves.toMatchObject({
@@ -171,9 +150,24 @@ describe("AI Responses agent", () => {
     const secondBody = JSON.parse(
       String((fetchMock.mock.calls[1] as [string, RequestInit])[1].body),
     );
-    const toolOutput = secondBody.input.find(
-      (item: { type?: string }) => item.type === "function_call_output",
+    const toolOutput = secondBody.messages.find(
+      (item: { role?: string }) => item.role === "tool",
     );
-    expect(JSON.parse(toolOutput.output)).toMatchObject({ success: false });
+    expect(JSON.parse(toolOutput.content)).toMatchObject({ success: false });
+  });
+
+  it("answers greetings without waiting for Groq", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      runMerchantAgent({
+        ...context,
+        history: [{ role: "user", content: "سلام" }],
+      }),
+    ).resolves.toEqual({
+      text: "وعليكم السلام 😊 مرحبا بيك، واش حاب تعرف على منتجاتنا؟",
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
