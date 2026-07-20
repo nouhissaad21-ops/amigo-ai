@@ -103,6 +103,12 @@ type StoredCredentials = {
   pageId?: string;
 };
 
+type MetaContent = {
+  text: string;
+  rawType: string;
+  mediaUrl?: string;
+};
+
 function channelAliases(channel: Channel) {
   const aliases: Array<string | null | undefined> = [
     channel.externalAccountId,
@@ -172,7 +178,7 @@ async function resolveMetaChannel(object: unknown, ids: string[]) {
   return connectedChannelByType(alternative, ids);
 }
 
-function metaContent(event: any) {
+function metaContent(event: any): MetaContent {
   const message = event?.message ?? event;
   const postback = event?.postback;
   const directText = String(
