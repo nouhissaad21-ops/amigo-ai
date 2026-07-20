@@ -8,9 +8,11 @@ import {
   Instagram,
   Loader2,
   MessageCircle,
+  Mic2,
   Plus,
   QrCode,
   ShieldCheck,
+  Sparkles,
   Unplug,
   Wifi,
   X,
@@ -23,61 +25,50 @@ import type { Channel } from "@/lib/types";
 const baileysEnabled = process.env.NEXT_PUBLIC_ENABLE_BAILEYS === "true";
 
 const statusLabel: Record<Channel["status"], string> = {
-  CONNECTED: "مربوط",
+  CONNECTED: "جاهز",
   PENDING: "قيد الربط",
   DISCONNECTED: "غير مربوط",
-  ERROR: "يحتاج تدخّل",
+  ERROR: "يحتاج إصلاح",
 };
 
 type MetaCapabilities = {
   configured: boolean;
+  businessLoginConfigured: boolean;
   instagramEnabled: boolean;
-};
-
-type ProviderCard = {
-  key: "facebook" | "instagram" | "whatsapp";
-  title: string;
-  description: string;
-  icon: typeof Facebook;
-  iconClass: string;
-  tint: string;
-  accounts: Channel[];
-  action: () => void | Promise<void>;
-  actionLabel: string;
-  disabled: boolean;
-  note: string;
+  directInstagramEnabled: boolean;
 };
 
 const metaErrorMessage: Record<string, string> = {
   META_NOT_CONFIGURED:
-    "إعداد Meta غير مكتمل عند مالك المنصة. يلزم App ID وApp Secret مرة واحدة فقط.",
-  META_OAUTH_DENIED: "تم إلغاء ربط Facebook قبل منح الصلاحيات.",
+    "إعداد Meta غير مكتمل. يلزم App ID وApp Secret في إعدادات المنصة.",
+  META_OAUTH_DENIED: "تم إلغاء نافذة Meta قبل منح الصلاحيات.",
   META_CODE_EXCHANGE_FAILED:
-    "Meta رفضت إكمال جلسة الربط. أعد المحاولة من حساب يدير الصفحة.",
-  META_LONG_TOKEN_FAILED: "تعذر إنشاء رمز وصول طويل المدة.",
-  META_API_ERROR: "Meta لم تسمح بقراءة الصفحات لهذا الحساب.",
+    "Meta رفضت جلسة الربط. تأكد أن حسابك يدير الصفحة ثم أعد المحاولة.",
+  META_LONG_TOKEN_FAILED: "تعذر تثبيت رمز Meta طويل المدة.",
+  META_API_ERROR: "Meta لم تسمح بقراءة الصفحات والحسابات لهذا المستخدم.",
   META_NO_PAGES:
-    "لم نجد صفحة Facebook يديرها هذا الحساب. تأكد أنك مسؤول في الصفحة ثم أعد المحاولة.",
+    "لم نجد صفحة Facebook. اختر الصفحة وحساب Instagram المرتبط داخل نافذة Meta.",
   META_SUBSCRIBE_ERROR:
-    "تم العثور على الصفحة لكن Meta رفضت تفعيل استقبال الرسائل. راجع صلاحية pages_messaging وWebhook في تطبيق Meta.",
-  INSTAGRAM_NOT_CONFIGURED: "إعداد Instagram غير مكتمل في تطبيق Meta.",
-  INSTAGRAM_OAUTH_DENIED: "تم إلغاء ربط Instagram قبل منح الصلاحيات.",
-  INSTAGRAM_CODE_EXCHANGE_FAILED: "Instagram رفضت إكمال جلسة الربط.",
-  INSTAGRAM_LONG_TOKEN_FAILED: "تعذر إنشاء رمز Instagram طويل المدة.",
-  INSTAGRAM_API_ERROR: "Instagram رفضت قراءة بيانات الحساب.",
-  INSTAGRAM_ACCOUNT_NOT_FOUND: "لم نجد حساب Instagram احترافياً لهذا المستخدم.",
-  INSTAGRAM_SUBSCRIBE_ERROR:
-    "تم العثور على Instagram لكن تعذر تفعيل استقبال الرسائل.",
+    "تم العثور على الصفحة لكن Meta رفضت تفعيل استقبال الرسائل.",
+  INSTAGRAM_NOT_CONFIGURED: "الربط المباشر لـInstagram غير مفعّل بعد.",
+  INSTAGRAM_OAUTH_DENIED: "تم إلغاء ربط Instagram.",
+  INSTAGRAM_CODE_EXCHANGE_FAILED: "Instagram رفض جلسة الربط.",
+  INSTAGRAM_LONG_TOKEN_FAILED:
+    "تعذر تثبيت رمز Instagram. استعمل زر الربط السريع عبر Meta أولاً.",
+  INSTAGRAM_API_ERROR: "Instagram رفض قراءة بيانات الحساب.",
+  INSTAGRAM_ACCOUNT_NOT_FOUND: "لم نجد حساب Instagram احترافياً.",
+  INSTAGRAM_SUBSCRIBE_ERROR: "تعذر تفعيل استقبال رسائل Instagram.",
   INSTAGRAM_PAGE_SUBSCRIBE_ERROR:
-    "تعذر تفعيل استقبال Instagram عبر صفحة Facebook المرتبطة.",
+    "تعذر تفعيل Instagram عبر صفحة Facebook المرتبطة.",
   OAUTH_REPLAYED: "انتهت صلاحية رابط الربط. اضغط ربط من جديد.",
-  MISSING_OAUTH_STATE: "انتهت أو تعطلت جلسة الربط. ابدأ الربط من جديد.",
+  MISSING_OAUTH_STATE: "انتهت جلسة الربط. ابدأ من جديد.",
   UNKNOWN: "حدث خطأ غير متوقع أثناء الربط.",
 };
 
 export default function Channels() {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [cloudForm, setCloudForm] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(true);
@@ -108,22 +99,21 @@ export default function Channels() {
     const params = new URLSearchParams(window.location.search);
     if (params.get("meta") === "connected") {
       const facebook = Number(params.get("facebook") ?? 0);
-      setNotice(`تم ربط Facebook بنجاح: ${facebook} صفحة.`);
+      const instagram = Number(params.get("instagram") ?? 0);
+      setNotice(
+        `تم الربط بنجاح: ${facebook} صفحة Facebook و${instagram} حساب Instagram.`,
+      );
       window.history.replaceState({}, "", "/dashboard/channels/");
     } else if (params.get("meta") === "error") {
       const reason = params.get("reason") ?? "UNKNOWN";
-      setError(metaErrorMessage[reason] ?? "حدث خطأ غير متوقع أثناء ربط Meta.");
+      setError(metaErrorMessage[reason] ?? metaErrorMessage.UNKNOWN);
       window.history.replaceState({}, "", "/dashboard/channels/");
     } else if (params.get("instagram") === "connected") {
-      setNotice(
-        "تم ربط Instagram. شغّل تشخيص القناة للتأكد من استقبال الرسائل قبل فتحها للزبائن.",
-      );
+      setNotice("تم ربط Instagram مباشرة. شغّل فحص الجاهزية الآن.");
       window.history.replaceState({}, "", "/dashboard/channels/");
     } else if (params.get("instagram") === "error") {
       const reason = params.get("reason") ?? "UNKNOWN";
-      setError(
-        metaErrorMessage[reason] ?? "حدث خطأ غير متوقع أثناء ربط Instagram.",
-      );
+      setError(metaErrorMessage[reason] ?? metaErrorMessage.UNKNOWN);
       window.history.replaceState({}, "", "/dashboard/channels/");
     }
   }, [load]);
@@ -131,8 +121,9 @@ export default function Channels() {
   useEffect(() => {
     const shouldRefresh = channels.some(
       (channel) =>
-        (channel.type === "WHATSAPP_BAILEYS" && channel.status === "PENDING") ||
-        (channel.type === "INSTAGRAM" && Boolean(channel.lastError)),
+        channel.status === "PENDING" ||
+        channel.status === "ERROR" ||
+        Boolean(channel.lastError),
     );
     if (!shouldRefresh) return;
     const timer = window.setInterval(() => void load(), 10_000);
@@ -152,6 +143,7 @@ export default function Channels() {
 
   async function connectMeta() {
     setError("");
+    setNotice("");
     setConnecting("meta");
     try {
       const { url } = await api.get<{ url: string }>(
@@ -223,63 +215,64 @@ export default function Channels() {
     }
   }
 
-  const providers: ProviderCard[] = [
-    {
-      key: "facebook",
-      title: "Facebook Messenger",
-      description: "استقبل رسائل الصفحة ورد على الزبائن تلقائياً.",
-      icon: Facebook,
-      iconClass: "bg-[#1877f2] text-white",
-      tint: "from-blue-50 to-white",
-      accounts: grouped.facebook,
-      action: connectMeta,
-      actionLabel:
-        metaCapabilities?.configured === false
-          ? "إعداد Meta غير مكتمل"
-          : "ربط Facebook",
-      disabled: metaCapabilities?.configured === false,
-      note: "التاجر يوافق مرة واحدة من نافذة Meta الرسمية.",
-    },
-    {
-      key: "instagram",
-      title: "Instagram Business",
-      description:
-        "استقبل رسائل الحساب الاحترافي، افحص الصلاحيات، ورد عبر Webhook أو مزامنة الصندوق الاحتياطية.",
-      icon: Instagram,
-      iconClass:
-        "bg-gradient-to-br from-violet-600 via-pink-500 to-amber-400 text-white",
-      tint: "from-pink-50 to-white",
-      accounts: grouped.instagram,
-      action: connectInstagram,
-      actionLabel: metaCapabilities?.instagramEnabled
-        ? "ربط Instagram"
-        : "بانتظار تفعيل Instagram",
-      disabled: !metaCapabilities?.instagramEnabled,
-      note: metaCapabilities?.instagramEnabled
-        ? "للحسابات خارج فريق التطبيق يلزم App Live وAdvanced Access لصلاحية الرسائل."
-        : "مالك المنصة يفعّل Instagram API مرة واحدة؛ بعدها التاجر يربطه بضغطة.",
-    },
-    {
-      key: "whatsapp",
-      title: "WhatsApp Business",
-      description: "الربط الرسمي والآمن عبر WhatsApp Cloud API.",
-      icon: MessageCircle,
-      iconClass: "bg-[#25d366] text-white",
-      tint: "from-emerald-50 to-white",
-      accounts: grouped.whatsapp,
-      action: () => setCloudForm(true),
-      actionLabel: "ربط WhatsApp",
-      disabled: false,
-      note: "Cloud API الرسمي مناسب للاستضافة ويعمل دون إبقاء هاتف مفتوح.",
-    },
-  ];
+  function ChannelList({ accounts }: { accounts: Channel[] }) {
+    if (!accounts.length)
+      return (
+        <p className="rounded-2xl border border-dashed border-slate-200 bg-white/70 p-4 text-center text-xs text-slate-400">
+          لا يوجد حساب مربوط بعد
+        </p>
+      );
+    return (
+      <div className="space-y-3">
+        {accounts.map((channel) => (
+          <div key={channel.id}>
+            <div className="flex items-center gap-3 rounded-2xl border border-slate-100 bg-white p-3 shadow-sm">
+              <span
+                className={`grid size-9 place-items-center rounded-xl ${channel.status === "CONNECTED" ? "bg-mint-50 text-mint-700" : "bg-amber-50 text-amber-700"}`}
+              >
+                {channel.status === "CONNECTED" ? (
+                  <Wifi size={16} />
+                ) : (
+                  <CircleAlert size={16} />
+                )}
+              </span>
+              <span className="min-w-0 flex-1">
+                <b className="block truncate text-xs text-slate-900">
+                  {channel.name}
+                </b>
+                <span className="text-[10px] text-slate-400">
+                  {statusLabel[channel.status]}
+                </span>
+                {channel.lastError && (
+                  <span className="mt-1 block line-clamp-2 text-[9px] leading-4 text-amber-700">
+                    {channel.lastError}
+                  </span>
+                )}
+              </span>
+              <button
+                aria-label="فصل القناة"
+                className="grid size-8 place-items-center rounded-xl text-slate-300 transition hover:bg-red-50 hover:text-red-600"
+                onClick={() => void disconnect(channel.id)}
+                type="button"
+              >
+                <Unplug size={15} />
+              </button>
+            </div>
+            {(channel.type === "INSTAGRAM" || channel.type === "FACEBOOK") && (
+              <ChannelDoctor channel={channel} />
+            )}
+          </div>
+        ))}
+      </div>
+    );
+  }
 
   return (
     <>
       <Header
-        eyebrow="مركز القنوات"
-        title="اربط منصاتك وراقب جاهزيتها"
-        description="الربط وحده لا يكفي: AmiGo يفحص Webhook والتوكن والرسائل والإرسال قبل استقبال الزبائن."
+        eyebrow="ربط القنوات"
+        title="وصّل Meta مرة واحدة وابدأ البيع"
+        description="زر واحد يربط صفحة Facebook وحساب Instagram الاحترافي المرتبط بها، ثم AmiGo يفحص الاستقبال والإرسال تلقائياً."
       />
 
       {error && (
@@ -303,158 +296,113 @@ export default function Channels() {
         </div>
       )}
 
-      <section className="card mb-5 overflow-hidden p-1">
-        <div className="grid gap-1 rounded-[1.4rem] bg-slate-50 p-3 sm:grid-cols-3">
-          {[
-            ["1", "اربط القناة", "تسجيل رسمي وآمن لدى المنصة"],
-            ["2", "افحص الجاهزية", "توكن، Webhook، صندوق الرسائل والإرسال"],
-            ["3", "ابدأ الأتمتة", "راقب الرسائل والطلبات من AmiGo"],
-          ].map(([number, title, description]) => (
-            <div
-              className="flex items-center gap-3 rounded-2xl bg-white p-4"
-              key={number}
-            >
-              <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-slate-950 text-sm font-black text-white">
-                {number}
-              </span>
-              <div>
-                <b className="block text-sm text-slate-900">{title}</b>
-                <span className="mt-1 block text-[11px] text-slate-400">
-                  {description}
-                </span>
-              </div>
+      <section className="relative mb-6 overflow-hidden rounded-[2rem] bg-slate-950 p-6 text-white shadow-xl sm:p-8">
+        <div className="pointer-events-none absolute -left-20 -top-24 size-72 rounded-full bg-cyan-400/20 blur-3xl" />
+        <div className="relative grid gap-7 lg:grid-cols-[1fr_auto] lg:items-center">
+          <div>
+            <span className="inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1.5 text-[11px] font-black text-mint-200">
+              <Sparkles size={14} /> الإعداد الأسهل والأكثر استقراراً
+            </span>
+            <h2 className="mt-4 text-2xl font-black sm:text-3xl">
+              Facebook + Instagram في موافقة واحدة
+            </h2>
+            <p className="mt-3 max-w-2xl text-sm leading-7 text-white/60">
+              سجّل بحساب يدير صفحة Facebook واختر الصفحة وحساب Instagram المرتبط.
+              لا تحتاج نسخ توكنات ولا إعدادات تقنية لكل متجر.
+            </p>
+            <div className="mt-5 flex flex-wrap gap-3 text-[11px] font-bold text-white/70">
+              <span className="flex items-center gap-1.5"><Check size={14} className="text-mint-300" /> رسائل نصية</span>
+              <span className="flex items-center gap-1.5"><Mic2 size={14} className="text-mint-300" /> فهم الرسائل الصوتية</span>
+              <span className="flex items-center gap-1.5"><ShieldCheck size={14} className="text-mint-300" /> OAuth رسمي وآمن</span>
             </div>
-          ))}
+          </div>
+          <button
+            className="btn-primary min-w-56 !bg-white !text-slate-950 hover:!bg-mint-50"
+            disabled={
+              metaCapabilities?.configured === false || connecting === "meta"
+            }
+            onClick={() => void connectMeta()}
+            type="button"
+          >
+            {connecting === "meta" ? (
+              <Loader2 className="animate-spin" size={18} />
+            ) : (
+              <span className="flex items-center gap-1">
+                <Facebook size={18} /> <Instagram size={18} />
+              </span>
+            )}
+            {metaCapabilities?.configured === false
+              ? "إعداد Meta غير مكتمل"
+              : "ربط Meta الآن"}
+          </button>
         </div>
       </section>
 
-      <section className="grid gap-5 xl:grid-cols-3">
-        {providers.map((provider) => {
-          const connected = provider.accounts.filter(
-            (channel) => channel.status === "CONNECTED",
-          ).length;
-          const Icon = provider.icon;
-          const providerLoading =
-            (provider.key === "facebook" && connecting === "meta") ||
-            (provider.key === "instagram" && connecting === "instagram");
-          return (
-            <article
-              className={`card relative overflow-hidden bg-gradient-to-b ${provider.tint} p-6`}
-              key={provider.key}
+      <section className="grid gap-5 lg:grid-cols-3">
+        <article className="card bg-gradient-to-b from-blue-50 to-white p-6">
+          <div className="flex items-center justify-between">
+            <span className="grid size-12 place-items-center rounded-2xl bg-[#1877f2] text-white"><Facebook size={24} /></span>
+            <span className="badge bg-blue-50 text-blue-700">{grouped.facebook.length} حساب</span>
+          </div>
+          <h2 className="mt-5 font-black text-slate-950">Facebook Messenger</h2>
+          <p className="mb-5 mt-2 text-xs leading-6 text-slate-500">الرسائل والردود والطلبات من صفحة المتجر.</p>
+          <ChannelList accounts={grouped.facebook} />
+        </article>
+
+        <article className="card bg-gradient-to-b from-pink-50 to-white p-6">
+          <div className="flex items-center justify-between">
+            <span className="grid size-12 place-items-center rounded-2xl bg-gradient-to-br from-violet-600 via-pink-500 to-amber-400 text-white"><Instagram size={24} /></span>
+            <span className="badge bg-pink-50 text-pink-700">{grouped.instagram.length} حساب</span>
+          </div>
+          <h2 className="mt-5 font-black text-slate-950">Instagram Business</h2>
+          <p className="mb-5 mt-2 text-xs leading-6 text-slate-500">يفهم النص والصوت والدارجة ويرد من الحساب الاحترافي.</p>
+          <ChannelList accounts={grouped.instagram} />
+          {metaCapabilities?.directInstagramEnabled && (
+            <button
+              className="mt-4 w-full text-xs font-bold text-pink-700 underline decoration-pink-200 underline-offset-4"
+              disabled={connecting === "instagram"}
+              onClick={() => void connectInstagram()}
+              type="button"
             >
-              <div className="flex items-start justify-between gap-4">
-                <span
-                  className={`grid size-12 place-items-center rounded-2xl shadow-sm ${provider.iconClass}`}
-                >
-                  <Icon size={25} />
-                </span>
-                <span
-                  className={`badge gap-1.5 ${connected ? "bg-mint-50 text-mint-700" : "bg-slate-100 text-slate-500"}`}
-                >
-                  <span
-                    className={`size-2 rounded-full ${connected ? "bg-mint-500" : "bg-slate-300"}`}
-                  />
-                  {connected ? `${connected} مربوط` : "غير مربوط"}
-                </span>
-              </div>
-              <h2 className="mt-6 text-lg font-black text-slate-950">
-                {provider.title}
-              </h2>
-              <p className="mt-2 min-h-12 text-sm leading-6 text-slate-500">
-                {provider.description}
-              </p>
-              <p className="mt-3 min-h-10 rounded-2xl bg-white/70 px-3 py-2 text-[10px] font-bold leading-5 text-slate-500">
-                {provider.note}
-              </p>
+              {connecting === "instagram" ? "جاري الفتح…" : "الربط المباشر كخيار احتياطي"}
+            </button>
+          )}
+        </article>
 
-              <div className="mt-5 space-y-3">
-                {provider.accounts.slice(0, 4).map((channel) => (
-                  <div key={channel.id}>
-                    <div className="flex items-center gap-3 rounded-2xl border border-slate-100 bg-white/85 p-3">
-                      <span
-                        className={`grid size-8 place-items-center rounded-xl ${channel.status === "CONNECTED" ? "bg-mint-50 text-mint-700" : "bg-amber-50 text-amber-700"}`}
-                      >
-                        {channel.status === "CONNECTED" ? (
-                          <Wifi size={15} />
-                        ) : (
-                          <CircleAlert size={15} />
-                        )}
-                      </span>
-                      <span className="min-w-0 flex-1">
-                        <b className="block truncate text-xs text-slate-800">
-                          {channel.name}
-                        </b>
-                        <span className="text-[10px] text-slate-400">
-                          {statusLabel[channel.status]}
-                        </span>
-                        {channel.lastError && (
-                          <span className="mt-1 block line-clamp-2 text-[9px] leading-4 text-amber-700">
-                            {channel.lastError}
-                          </span>
-                        )}
-                      </span>
-                      <button
-                        aria-label="فصل القناة"
-                        className="grid size-8 place-items-center rounded-xl text-slate-300 transition hover:bg-red-50 hover:text-red-600"
-                        onClick={() => void disconnect(channel.id)}
-                        type="button"
-                      >
-                        <Unplug size={15} />
-                      </button>
-                    </div>
-                    {(channel.type === "INSTAGRAM" ||
-                      channel.type === "FACEBOOK") && (
-                      <ChannelDoctor channel={channel} />
-                    )}
-                  </div>
-                ))}
-              </div>
-
-              <button
-                className={
-                  connected
-                    ? "btn-secondary mt-5 w-full"
-                    : "btn-primary mt-5 w-full"
-                }
-                disabled={
-                  provider.disabled ||
-                  connecting === "meta" ||
-                  connecting === "instagram"
-                }
-                onClick={() => void provider.action()}
-                type="button"
-              >
-                {providerLoading ? (
-                  <Loader2 className="animate-spin" size={18} />
-                ) : (
-                  <Plus size={18} />
-                )}
-                {connected ? "إضافة حساب آخر" : provider.actionLabel}
-              </button>
-            </article>
-          );
-        })}
+        <article className="card bg-gradient-to-b from-emerald-50 to-white p-6">
+          <div className="flex items-center justify-between">
+            <span className="grid size-12 place-items-center rounded-2xl bg-[#25d366] text-white"><MessageCircle size={24} /></span>
+            <span className="badge bg-emerald-50 text-emerald-700">{grouped.whatsapp.length} حساب</span>
+          </div>
+          <h2 className="mt-5 font-black text-slate-950">WhatsApp Business</h2>
+          <p className="mb-5 mt-2 text-xs leading-6 text-slate-500">Cloud API الرسمي للعمل المستمر على الاستضافة.</p>
+          <ChannelList accounts={grouped.whatsapp} />
+          <button className="btn-secondary mt-4 w-full" onClick={() => setCloudForm(true)} type="button"><Plus size={18} /> ربط WhatsApp</button>
+        </article>
       </section>
+
+      <button
+        className="mx-auto mt-5 block text-xs font-bold text-slate-400 underline underline-offset-4"
+        onClick={() => setShowAdvanced((value) => !value)}
+        type="button"
+      >
+        {showAdvanced ? "إخفاء المعلومات التقنية" : "عرض حالة إعداد المنصة"}
+      </button>
+      {showAdvanced && (
+        <aside className="mt-4 rounded-2xl border border-slate-100 bg-white p-4 text-xs leading-6 text-slate-600">
+          <b className="text-slate-900">حالة الربط:</b>{" "}
+          Meta {metaCapabilities?.configured ? "جاهز" : "غير مضبوط"} · Business Login {metaCapabilities?.businessLoginConfigured ? "جاهز" : "يحتاج Config ID"} · Instagram مباشر {metaCapabilities?.directInstagramEnabled ? "جاهز" : "غير مفعّل"}.
+        </aside>
+      )}
 
       {cloudForm && (
         <section className="card mt-5 overflow-hidden">
           <div className="flex items-center justify-between border-b border-slate-100 px-6 py-5">
             <div>
-              <h2 className="font-black text-slate-950">
-                ربط WhatsApp Cloud API
-              </h2>
-              <p className="mt-1 text-xs text-slate-400">
-                أدخل البيانات من لوحة Meta for Developers
-              </p>
+              <h2 className="font-black text-slate-950">ربط WhatsApp Cloud API</h2>
+              <p className="mt-1 text-xs text-slate-400">أدخل البيانات من لوحة Meta for Developers</p>
             </div>
-            <button
-              aria-label="إغلاق"
-              className="grid size-9 place-items-center rounded-xl bg-slate-100 text-slate-500"
-              onClick={() => setCloudForm(false)}
-              type="button"
-            >
-              <X size={18} />
-            </button>
+            <button aria-label="إغلاق" className="grid size-9 place-items-center rounded-xl bg-slate-100 text-slate-500" onClick={() => setCloudForm(false)} type="button"><X size={18} /></button>
           </div>
           <form className="grid gap-4 p-6 sm:grid-cols-2" onSubmit={saveCloud}>
             {[
@@ -465,34 +413,15 @@ export default function Channels() {
             ].map(([name, label, placeholder]) => (
               <label key={name}>
                 <span className="label">{label}</span>
-                <input
-                  autoComplete="off"
-                  className="field"
-                  name={name}
-                  placeholder={placeholder}
-                  required
-                  type={name === "accessToken" ? "password" : "text"}
-                />
+                <input autoComplete="off" className="field" name={name} placeholder={placeholder} required type={name === "accessToken" ? "password" : "text"} />
               </label>
             ))}
             <div className="flex flex-wrap gap-2 sm:col-span-2">
               <button className="btn-primary" disabled={connecting === "cloud"}>
-                {connecting === "cloud" ? (
-                  <Loader2 className="animate-spin" size={18} />
-                ) : (
-                  <ShieldCheck size={18} />
-                )}
-                حفظ وربط القناة
+                {connecting === "cloud" ? <Loader2 className="animate-spin" size={18} /> : <ShieldCheck size={18} />} حفظ وربط القناة
               </button>
               {baileysEnabled && (
-                <button
-                  className="btn-secondary"
-                  disabled={connecting === "qr"}
-                  onClick={() => void connectQr()}
-                  type="button"
-                >
-                  <QrCode size={18} /> الربط عبر QR
-                </button>
+                <button className="btn-secondary" disabled={connecting === "qr"} onClick={() => void connectQr()} type="button"><QrCode size={18} /> الربط عبر QR</button>
               )}
             </div>
           </form>
@@ -500,18 +429,12 @@ export default function Channels() {
       )}
 
       {loading && (
-        <div className="mt-5 flex items-center justify-center gap-2 py-8 text-sm text-slate-400">
-          <Loader2 className="animate-spin" size={18} /> جاري تحميل القنوات…
-        </div>
+        <div className="mt-5 flex items-center justify-center gap-2 py-8 text-sm text-slate-400"><Loader2 className="animate-spin" size={18} /> جاري تحميل القنوات…</div>
       )}
 
       <aside className="mt-5 flex items-start gap-3 rounded-2xl border border-amber-100 bg-amber-50 p-4 text-xs leading-6 text-amber-900">
         <ShieldCheck className="mt-0.5 shrink-0" size={19} />
-        <p>
-          <b>جاهزية الإنتاج تُقاس بالرسائل، وليس بظهور كلمة مربوط.</b> شغّل
-          «تشخيص القناة» بعد كل ربط. حسابات Instagram خارج فريق تطبيق Meta تحتاج
-          الموافقة على صلاحية الرسائل قبل أن تصل رسائل الزبائن العاديين.
-        </p>
+        <p><b>للعمل مع زبائن حقيقيين، يجب أن يكون تطبيق Meta في وضع Live وتكون صلاحيات الرسائل معتمدة.</b> بعد الربط شغّل «فحص الجاهزية» لكل حساب.</p>
       </aside>
     </>
   );
