@@ -57,13 +57,61 @@ whatsappOutboundQueue.on("error", (error) =>
   logger.error({ err: error, queue: "whatsapp-outbound" }, "queue error"),
 );
 
-export async function enqueueInbound(eventId: string, force = false) {
-  if (force) {
-    const old = await inboundQueue.getJob(eventId);
-    if (old) {
-      const state = await old.getState();
-      if (state === "failed" || state === "completed") await old.remove();
+const directEvents = new Set<string>();
+
+async function processInboundDirectly(eventId: string) {
+  if (directEvents.has(eventId)) return;
+  directEvents.add(eventId);
+  try {
+    const { processInboundEvent, sendFallbackForEvent } = await import(
+      "./services/inbound.js"
+    );
+    try {
+      await processInboundEvent(eventId);
+    } catch (error) {
+      logger.error({ err: error, eventId }, "direct inbound processing failed");
+      const { systemDb } = await import("./db.js");
+      const event = await systemDb.webhookEvent
+        .findUnique({ where: { id: eventId }, select: { attempts: true } })
+        .catch(() => null);
+      if ((event?.attempts ?? 0) >= 5)
+        await sendFallbackForEvent(eventId).catch((fallbackError) =>
+          logger.error(
+            { err: fallbackError, eventId },
+            "direct inbound fallback failed",
+          ),
+        );
     }
+  } finally {
+    directEvents.delete(eventId);
   }
-  await inboundQueue.add("process", { eventId }, { jobId: eventId });
+}
+
+async function enqueueWithRedis(eventId: string, force: boolean) {
+  try {
+    if (force) {
+      const old = await inboundQueue.getJob(eventId);
+      if (old) {
+        const state = await old.getState();
+        if (state === "failed" || state === "completed") await old.remove();
+      }
+    }
+    await inboundQueue.add("process", { eventId }, { jobId: eventId });
+  } catch (error) {
+    // The webhook has already been persisted in Postgres. Redis is only an
+    // accelerator now, so a sleeping free-tier instance cannot stop replies.
+    logger.error(
+      { err: error, eventId },
+      "inbound queue unavailable; using direct processing",
+    );
+  }
+}
+
+export async function enqueueInbound(eventId: string, force = false) {
+  // Do not make Meta wait for Redis. Queue insertion and direct processing run
+  // after this function resolves, allowing the webhook endpoint to answer 200.
+  void enqueueWithRedis(eventId, force);
+  setImmediate(() => {
+    void processInboundDirectly(eventId);
+  });
 }
