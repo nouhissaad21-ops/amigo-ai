@@ -91,7 +91,10 @@ integrationsRouter.get("/meta/status", authenticate, (_req, res) => {
   );
   res.json({
     configured,
-    instagramEnabled: env.META_ENABLE_INSTAGRAM && instagramConfigured,
+    businessLoginConfigured: Boolean(env.META_LOGIN_CONFIG_ID),
+    instagramEnabled: env.META_ENABLE_INSTAGRAM,
+    directInstagramEnabled:
+      env.META_ENABLE_INSTAGRAM && instagramConfigured,
   });
 });
 
@@ -127,7 +130,7 @@ integrationsRouter.get("/meta/callback", async (req, res) => {
     const result = await completeMetaOAuth(state.storeId, code);
     oauthRedirect(res, "meta", "connected", {
       facebook: String(result.facebook),
-      instagram: "0",
+      instagram: String(result.instagram),
     });
   } catch (reason) {
     oauthRedirect(res, "meta", "error", {

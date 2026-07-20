@@ -2,12 +2,20 @@ import type { Channel, ChannelType } from "@prisma/client";
 import { env } from "../config.js";
 import { systemDb } from "../db.js";
 import { AppError } from "../errors.js";
+import { logger } from "../logger.js";
 import { encryptJson, metaAppSecretProof } from "../security.js";
+import { repairInstagramChannel } from "./instagram.js";
+
+type InstagramBusinessAccount = {
+  id: string;
+  username?: string;
+};
 
 type Page = {
   id: string;
   name: string;
   access_token: string;
+  instagram_business_account?: InstagramBusinessAccount;
 };
 
 type MetaErrorBody = {
@@ -29,6 +37,8 @@ const pagePermissionScopes = new Set([
   "pages_read_engagement",
   "pages_manage_metadata",
   "pages_messaging",
+  "instagram_basic",
+  "instagram_manage_messages",
 ]);
 
 function metaCredentials() {
@@ -49,6 +59,7 @@ async function graph<T>(path: string, token?: string): Promise<T> {
 
   const response = await fetch(url, {
     headers: token ? { authorization: `Bearer ${token}` } : {},
+    signal: AbortSignal.timeout(12_000),
   });
   const data = (await response.json()) as T & MetaErrorBody;
   if (!response.ok || data.error)
@@ -74,7 +85,7 @@ async function pagesFromTokenTargets(
     `${credentials.appId}|${credentials.appSecret}`,
   );
 
-  const response = await fetch(url);
+  const response = await fetch(url, { signal: AbortSignal.timeout(12_000) });
   const data = (await response.json()) as MetaDebugTokenBody & MetaErrorBody;
   if (!response.ok || data.error)
     throw new AppError(
@@ -123,9 +134,15 @@ async function subscribe(id: string, token: string, fields: string) {
   const response = await fetch(url, {
     method: "POST",
     headers: { authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(12_000),
   });
-  if (!response.ok)
-    throw new AppError(502, "META_SUBSCRIBE_ERROR", "فشل Webhook subscription");
+  const data = (await response.json().catch(() => ({}))) as MetaErrorBody;
+  if (!response.ok || data.error)
+    throw new AppError(
+      502,
+      "META_SUBSCRIBE_ERROR",
+      data.error?.message ?? "فشل Webhook subscription",
+    );
 }
 
 async function save(input: {
@@ -163,6 +180,56 @@ async function save(input: {
     : systemDb.channel.create({ data });
 }
 
+async function saveLinkedInstagram(input: {
+  storeId: string;
+  page: Page;
+  instagram: InstagramBusinessAccount;
+}) {
+  const old = await systemDb.channel.findUnique({
+    where: {
+      type_externalAccountId: {
+        type: "INSTAGRAM",
+        externalAccountId: input.instagram.id,
+      },
+    },
+  });
+  if (old && old.storeId !== input.storeId)
+    throw new AppError(409, "CHANNEL_ALREADY_LINKED", "الحساب مربوط بمتجر آخر");
+
+  const data = {
+    storeId: input.storeId,
+    type: "INSTAGRAM" as const,
+    externalAccountId: input.instagram.id,
+    externalBusinessId: input.page.id,
+    name: input.instagram.username
+      ? `@${input.instagram.username}`
+      : `${input.page.name} · Instagram`,
+    credentialsEncrypted: encryptJson({
+      accessToken: input.page.access_token,
+      facebookPageAccessToken: input.page.access_token,
+      instagramUserId: input.instagram.id,
+      pageId: input.page.id,
+      graphHost: "facebook",
+    }),
+    status: "CONNECTED" as const,
+    lastConnectedAt: new Date(),
+    lastError: null,
+  };
+  const channel = old
+    ? await systemDb.channel.update({ where: { id: old.id }, data })
+    : await systemDb.channel.create({ data });
+
+  try {
+    await repairInstagramChannel(channel);
+  } catch (error) {
+    logger.warn(
+      { err: error, channelId: channel.id, pageId: input.page.id },
+      "Linked Instagram saved; subscription repair will retry in background",
+    );
+  }
+  return channel;
+}
+
 export function metaOAuthUrl(state: string) {
   const credentials = metaCredentials();
   const url = new URL(
@@ -173,14 +240,22 @@ export function metaOAuthUrl(state: string) {
     "pages_read_engagement",
     "pages_manage_metadata",
     "pages_messaging",
+    ...(env.META_ENABLE_INSTAGRAM
+      ? ["instagram_basic", "instagram_manage_messages"]
+      : []),
   ];
 
   url.searchParams.set("client_id", credentials.appId);
   url.searchParams.set("redirect_uri", env.META_OAUTH_REDIRECT_URI);
   url.searchParams.set("state", state);
   url.searchParams.set("response_type", "code");
-  url.searchParams.set("scope", scopes.join(","));
   url.searchParams.set("auth_type", "rerequest");
+  if (env.META_LOGIN_CONFIG_ID) {
+    url.searchParams.set("config_id", env.META_LOGIN_CONFIG_ID);
+    url.searchParams.set("override_default_response_type", "true");
+  } else {
+    url.searchParams.set("scope", scopes.join(","));
+  }
   return url.toString();
 }
 
@@ -194,7 +269,9 @@ export async function completeMetaOAuth(storeId: string, code: string) {
   exchangeUrl.searchParams.set("redirect_uri", env.META_OAUTH_REDIRECT_URI);
   exchangeUrl.searchParams.set("code", code);
 
-  const exchangeResponse = await fetch(exchangeUrl);
+  const exchangeResponse = await fetch(exchangeUrl, {
+    signal: AbortSignal.timeout(12_000),
+  });
   const exchangeData = (await exchangeResponse.json()) as {
     access_token?: string;
   } & MetaErrorBody;
@@ -210,7 +287,9 @@ export async function completeMetaOAuth(storeId: string, code: string) {
   longTokenUrl.searchParams.delete("code");
   longTokenUrl.searchParams.set("grant_type", "fb_exchange_token");
   longTokenUrl.searchParams.set("fb_exchange_token", exchangeData.access_token);
-  const longTokenResponse = await fetch(longTokenUrl);
+  const longTokenResponse = await fetch(longTokenUrl, {
+    signal: AbortSignal.timeout(12_000),
+  });
   const longTokenData = (await longTokenResponse.json()) as {
     access_token?: string;
   } & MetaErrorBody;
@@ -221,7 +300,12 @@ export async function completeMetaOAuth(storeId: string, code: string) {
       longTokenData.error?.message ?? "فشل Long-lived token",
     );
 
-  const fields = ["id", "name", "access_token"];
+  const fields = [
+    "id",
+    "name",
+    "access_token",
+    "instagram_business_account{id,username}",
+  ];
   let pages = await graph<{ data: Page[] }>(
     `me/accounts?fields=${encodeURIComponent(fields.join(","))}&limit=100`,
     longTokenData.access_token,
@@ -235,10 +319,11 @@ export async function completeMetaOAuth(storeId: string, code: string) {
     throw new AppError(
       422,
       "META_NO_PAGES",
-      "Meta لم تعرض أي صفحة ولم نجد صفحات ضمن صلاحيات الرمز. أعد اختيار الصفحة أثناء الربط ثم حاول مجدداً.",
+      "Meta لم تعرض أي صفحة. اختر الصفحة والحساب المرتبط أثناء الربط ثم حاول مجدداً.",
     );
 
   let facebook = 0;
+  let instagram = 0;
   let failed = 0;
   for (const page of pages.data) {
     const pageChannel = await save({
@@ -257,7 +342,7 @@ export async function completeMetaOAuth(storeId: string, code: string) {
       );
       await systemDb.channel.update({
         where: { id: pageChannel.id },
-        data: { webhookSubscribedAt: new Date() },
+        data: { webhookSubscribedAt: new Date(), status: "CONNECTED", lastError: null },
       });
       facebook++;
     } catch (error) {
@@ -269,6 +354,15 @@ export async function completeMetaOAuth(storeId: string, code: string) {
       });
       failed++;
     }
+
+    if (env.META_ENABLE_INSTAGRAM && page.instagram_business_account) {
+      await saveLinkedInstagram({
+        storeId,
+        page,
+        instagram: page.instagram_business_account,
+      });
+      instagram++;
+    }
   }
 
   if (!facebook && failed)
@@ -278,5 +372,5 @@ export async function completeMetaOAuth(storeId: string, code: string) {
       "تم العثور على الصفحة لكن تعذر تفعيل Webhook عليها",
     );
 
-  return { facebook, instagram: 0 };
+  return { facebook, instagram };
 }
