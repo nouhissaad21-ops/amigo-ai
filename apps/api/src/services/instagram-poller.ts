@@ -136,10 +136,9 @@ function graphCandidates(channel: Channel, credentials: InstagramCredentials) {
     candidates.push({ key, host, accountId, token, platformParam });
   };
 
-  // Instagram Login is the canonical path and must not receive the
-  // Facebook-only platform=instagram query parameter.
-  add("instagram-user", "instagram", instagramId, instagramToken);
-  add("instagram-me", "instagram", "me", instagramToken);
+  // Meta's Conversations API documents platform=instagram for both login modes.
+  add("instagram-user", "instagram", instagramId, instagramToken, true);
+  add("instagram-me", "instagram", "me", instagramToken, true);
 
   // Facebook Login/Page-linked accounts use a Page access token. Meta has
   // supported both Page ID and IG professional-account ID shapes over time.
