@@ -8,6 +8,7 @@ import { logger } from "../logger.js";
 import { enqueueInbound } from "../queues.js";
 import { decryptJson, verifyHmacSignature } from "../security.js";
 import type { NormalizedInbound } from "../services/inbound.js";
+import { audioAttachmentUrl } from "../services/media-intelligence.js";
 
 export const metaWebhookRouter = Router(),
   whatsappWebhookRouter = Router();
@@ -151,8 +152,6 @@ async function connectedChannelByType(
   );
   if (aliasMatch) return aliasMatch;
 
-  // Instagram Login has occasionally delivered an alias not exposed by OAuth.
-  // This fallback is safe only when this installation has one Instagram channel.
   if (type === "INSTAGRAM" && candidates.length === 1) {
     logger.warn(
       { channelId: candidates[0]?.id, candidateAccountIds: ids },
@@ -169,25 +168,39 @@ async function resolveMetaChannel(object: unknown, ids: string[]) {
   const first = await connectedChannelByType(preferred, ids);
   if (first) return first;
 
-  // Instagram messages linked through a Facebook Page can arrive with
-  // object="page". Trying the other channel type prevents dropping them.
   const alternative = preferred === "FACEBOOK" ? "INSTAGRAM" : "FACEBOOK";
   return connectedChannelByType(alternative, ids);
 }
 
-function metaText(event: any) {
+function metaContent(event: any) {
   const message = event?.message ?? event;
   const postback = event?.postback;
-  return String(
+  const directText = String(
     message?.text ??
       message?.message ??
       message?.quick_reply?.payload ??
       postback?.title ??
       postback?.payload ??
-      (message?.attachments?.length
-        ? "[The customer sent an attachment or image]"
-        : ""),
+      "",
   ).trim();
+  if (directText)
+    return { text: directText, rawType: event?.postback ? "postback" : "text" };
+
+  const mediaUrl = audioAttachmentUrl(event);
+  if (mediaUrl)
+    return {
+      text: "[Customer sent a voice message]",
+      rawType: "audio",
+      mediaUrl,
+    };
+
+  if (message?.attachments?.length)
+    return {
+      text: "[The customer sent an attachment or image]",
+      rawType: "attachment",
+    };
+
+  return { text: "", rawType: "text" };
 }
 
 function eventMessageId(event: any, accountId: string, text: string) {
@@ -275,12 +288,12 @@ metaWebhookRouter.post("/", async (req, res) => {
       const customerId = customerParticipant(event, businessAliases);
       if (!customerId) continue;
 
-      const text = metaText(event);
-      if (!text) continue;
+      const content = metaContent(event);
+      if (!content.text) continue;
       const externalMessageId = eventMessageId(
         event,
         ids[0] ?? channel.externalAccountId,
-        text,
+        content.text,
       );
       routed++;
       jobs.push(
@@ -291,15 +304,12 @@ metaWebhookRouter.post("/", async (req, res) => {
           payload: {
             externalMessageId,
             customerExternalId: customerId,
-            text,
+            text: content.text,
             timestamp: new Date(
               Number(event?.timestamp ?? entry?.time ?? Date.now()),
             ).toISOString(),
-            rawType: event?.postback
-              ? "postback"
-              : message?.attachments
-                ? "attachment"
-                : "text",
+            rawType: content.rawType,
+            mediaUrl: content.mediaUrl,
           },
         }),
       );
