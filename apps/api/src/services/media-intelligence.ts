@@ -79,7 +79,7 @@ export async function transcribeMetaVoice(
     const form = new FormData();
     form.set(
       "file",
-      new Blob([bytes], { type: contentType }),
+      new Blob([new Uint8Array(bytes)], { type: contentType }),
       audioFilename(contentType),
     );
     form.set("model", env.GROQ_TRANSCRIPTION_MODEL);
