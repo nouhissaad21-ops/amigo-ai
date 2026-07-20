@@ -15,6 +15,7 @@ import {
   Wifi,
   X,
 } from "lucide-react";
+import { ChannelDoctor } from "@/components/channel-doctor";
 import { Header } from "@/components/ui";
 import { api } from "@/lib/api";
 import type { Channel } from "@/lib/types";
@@ -31,6 +32,20 @@ const statusLabel: Record<Channel["status"], string> = {
 type MetaCapabilities = {
   configured: boolean;
   instagramEnabled: boolean;
+};
+
+type ProviderCard = {
+  key: "facebook" | "instagram" | "whatsapp";
+  title: string;
+  description: string;
+  icon: typeof Facebook;
+  iconClass: string;
+  tint: string;
+  accounts: Channel[];
+  action: () => void | Promise<void>;
+  actionLabel: string;
+  disabled: boolean;
+  note: string;
 };
 
 const metaErrorMessage: Record<string, string> = {
@@ -53,6 +68,8 @@ const metaErrorMessage: Record<string, string> = {
   INSTAGRAM_ACCOUNT_NOT_FOUND: "لم نجد حساب Instagram احترافياً لهذا المستخدم.",
   INSTAGRAM_SUBSCRIBE_ERROR:
     "تم العثور على Instagram لكن تعذر تفعيل استقبال الرسائل.",
+  INSTAGRAM_PAGE_SUBSCRIBE_ERROR:
+    "تعذر تفعيل استقبال Instagram عبر صفحة Facebook المرتبطة.",
   OAUTH_REPLAYED: "انتهت صلاحية رابط الربط. اضغط ربط من جديد.",
   MISSING_OAUTH_STATE: "انتهت أو تعطلت جلسة الربط. ابدأ الربط من جديد.",
   UNKNOWN: "حدث خطأ غير متوقع أثناء الربط.",
@@ -98,7 +115,9 @@ export default function Channels() {
       setError(metaErrorMessage[reason] ?? "حدث خطأ غير متوقع أثناء ربط Meta.");
       window.history.replaceState({}, "", "/dashboard/channels/");
     } else if (params.get("instagram") === "connected") {
-      setNotice("تم ربط Instagram بنجاح.");
+      setNotice(
+        "تم ربط Instagram. شغّل تشخيص القناة للتأكد من استقبال الرسائل قبل فتحها للزبائن.",
+      );
       window.history.replaceState({}, "", "/dashboard/channels/");
     } else if (params.get("instagram") === "error") {
       const reason = params.get("reason") ?? "UNKNOWN";
@@ -110,12 +129,13 @@ export default function Channels() {
   }, [load]);
 
   useEffect(() => {
-    const pendingQr = channels.some(
+    const shouldRefresh = channels.some(
       (channel) =>
-        channel.type === "WHATSAPP_BAILEYS" && channel.status === "PENDING",
+        (channel.type === "WHATSAPP_BAILEYS" && channel.status === "PENDING") ||
+        (channel.type === "INSTAGRAM" && Boolean(channel.lastError)),
     );
-    if (!pendingQr) return;
-    const timer = window.setInterval(() => void load(), 4000);
+    if (!shouldRefresh) return;
+    const timer = window.setInterval(() => void load(), 10_000);
     return () => window.clearInterval(timer);
   }, [channels, load]);
 
@@ -203,7 +223,7 @@ export default function Channels() {
     }
   }
 
-  const providers = [
+  const providers: ProviderCard[] = [
     {
       key: "facebook",
       title: "Facebook Messenger",
@@ -223,7 +243,8 @@ export default function Channels() {
     {
       key: "instagram",
       title: "Instagram Business",
-      description: "استقبل رسائل حساب Instagram الاحترافي ورد عليها تلقائياً.",
+      description:
+        "استقبل رسائل الحساب الاحترافي، افحص الصلاحيات، ورد عبر Webhook أو مزامنة الصندوق الاحتياطية.",
       icon: Instagram,
       iconClass:
         "bg-gradient-to-br from-violet-600 via-pink-500 to-amber-400 text-white",
@@ -235,7 +256,7 @@ export default function Channels() {
         : "بانتظار تفعيل Instagram",
       disabled: !metaCapabilities?.instagramEnabled,
       note: metaCapabilities?.instagramEnabled
-        ? "تسجيل مباشر وآمن عبر Instagram Business Login."
+        ? "للحسابات خارج فريق التطبيق يلزم App Live وAdvanced Access لصلاحية الرسائل."
         : "مالك المنصة يفعّل Instagram API مرة واحدة؛ بعدها التاجر يربطه بضغطة.",
     },
     {
@@ -251,14 +272,14 @@ export default function Channels() {
       disabled: false,
       note: "Cloud API الرسمي مناسب للاستضافة ويعمل دون إبقاء هاتف مفتوح.",
     },
-  ] as const;
+  ];
 
   return (
     <>
       <Header
         eyebrow="مركز القنوات"
-        title="اربط منصاتك في مكان واحد"
-        description="اختَر القناة، وافق على الصلاحيات مرة واحدة، وAmiGo يتكفل بالباقي."
+        title="اربط منصاتك وراقب جاهزيتها"
+        description="الربط وحده لا يكفي: AmiGo يفحص Webhook والتوكن والرسائل والإرسال قبل استقبال الزبائن."
       />
 
       {error && (
@@ -285,9 +306,9 @@ export default function Channels() {
       <section className="card mb-5 overflow-hidden p-1">
         <div className="grid gap-1 rounded-[1.4rem] bg-slate-50 p-3 sm:grid-cols-3">
           {[
-            ["1", "اختَر القناة", "Facebook، Instagram أو WhatsApp"],
-            ["2", "وافق على الربط", "تسجيل آمن لدى المنصة الرسمية"],
-            ["3", "ابدأ الأتمتة", "الرسائل والطلبات تظهر هنا"],
+            ["1", "اربط القناة", "تسجيل رسمي وآمن لدى المنصة"],
+            ["2", "افحص الجاهزية", "توكن، Webhook، صندوق الرسائل والإرسال"],
+            ["3", "ابدأ الأتمتة", "راقب الرسائل والطلبات من AmiGo"],
           ].map(([number, title, description]) => (
             <div
               className="flex items-center gap-3 rounded-2xl bg-white p-4"
@@ -342,40 +363,49 @@ export default function Channels() {
               <p className="mt-2 min-h-12 text-sm leading-6 text-slate-500">
                 {provider.description}
               </p>
-              <p className="mt-3 min-h-10 rounded-2xl bg-white/70 px-3 py-2 text-[10px] font-bold leading-5 text-slate-400">
+              <p className="mt-3 min-h-10 rounded-2xl bg-white/70 px-3 py-2 text-[10px] font-bold leading-5 text-slate-500">
                 {provider.note}
               </p>
 
-              <div className="mt-5 space-y-2">
-                {provider.accounts.slice(0, 2).map((channel) => (
-                  <div
-                    className="flex items-center gap-3 rounded-2xl border border-slate-100 bg-white/85 p-3"
-                    key={channel.id}
-                  >
-                    <span
-                      className={`grid size-8 place-items-center rounded-xl ${channel.status === "CONNECTED" ? "bg-mint-50 text-mint-700" : "bg-amber-50 text-amber-700"}`}
-                    >
-                      {channel.status === "CONNECTED" ? (
-                        <Wifi size={15} />
-                      ) : (
-                        <CircleAlert size={15} />
-                      )}
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <b className="block truncate text-xs text-slate-800">
-                        {channel.name}
-                      </b>
-                      <span className="text-[10px] text-slate-400">
-                        {statusLabel[channel.status]}
+              <div className="mt-5 space-y-3">
+                {provider.accounts.slice(0, 4).map((channel) => (
+                  <div key={channel.id}>
+                    <div className="flex items-center gap-3 rounded-2xl border border-slate-100 bg-white/85 p-3">
+                      <span
+                        className={`grid size-8 place-items-center rounded-xl ${channel.status === "CONNECTED" ? "bg-mint-50 text-mint-700" : "bg-amber-50 text-amber-700"}`}
+                      >
+                        {channel.status === "CONNECTED" ? (
+                          <Wifi size={15} />
+                        ) : (
+                          <CircleAlert size={15} />
+                        )}
                       </span>
-                    </span>
-                    <button
-                      aria-label="فصل القناة"
-                      className="grid size-8 place-items-center rounded-xl text-slate-300 transition hover:bg-red-50 hover:text-red-600"
-                      onClick={() => void disconnect(channel.id)}
-                    >
-                      <Unplug size={15} />
-                    </button>
+                      <span className="min-w-0 flex-1">
+                        <b className="block truncate text-xs text-slate-800">
+                          {channel.name}
+                        </b>
+                        <span className="text-[10px] text-slate-400">
+                          {statusLabel[channel.status]}
+                        </span>
+                        {channel.lastError && (
+                          <span className="mt-1 block line-clamp-2 text-[9px] leading-4 text-amber-700">
+                            {channel.lastError}
+                          </span>
+                        )}
+                      </span>
+                      <button
+                        aria-label="فصل القناة"
+                        className="grid size-8 place-items-center rounded-xl text-slate-300 transition hover:bg-red-50 hover:text-red-600"
+                        onClick={() => void disconnect(channel.id)}
+                        type="button"
+                      >
+                        <Unplug size={15} />
+                      </button>
+                    </div>
+                    {(channel.type === "INSTAGRAM" ||
+                      channel.type === "FACEBOOK") && (
+                      <ChannelDoctor channel={channel} />
+                    )}
                   </div>
                 ))}
               </div>
@@ -392,6 +422,7 @@ export default function Channels() {
                   connecting === "instagram"
                 }
                 onClick={() => void provider.action()}
+                type="button"
               >
                 {providerLoading ? (
                   <Loader2 className="animate-spin" size={18} />
@@ -420,6 +451,7 @@ export default function Channels() {
               aria-label="إغلاق"
               className="grid size-9 place-items-center rounded-xl bg-slate-100 text-slate-500"
               onClick={() => setCloudForm(false)}
+              type="button"
             >
               <X size={18} />
             </button>
@@ -476,8 +508,9 @@ export default function Channels() {
       <aside className="mt-5 flex items-start gap-3 rounded-2xl border border-amber-100 bg-amber-50 p-4 text-xs leading-6 text-amber-900">
         <ShieldCheck className="mt-0.5 shrink-0" size={19} />
         <p>
-          <b>الربط الرسمي هو الموصى به.</b> WhatsApp Cloud API أكثر استقراراً،
-          بينما QR يحتاج خادماً دائماً ولذلك يبقى معطلاً على الاستضافة المجانية.
+          <b>جاهزية الإنتاج تُقاس بالرسائل، وليس بظهور كلمة مربوط.</b> شغّل
+          «تشخيص القناة» بعد كل ربط. حسابات Instagram خارج فريق تطبيق Meta تحتاج
+          الموافقة على صلاحية الرسائل قبل أن تصل رسائل الزبائن العاديين.
         </p>
       </aside>
     </>
