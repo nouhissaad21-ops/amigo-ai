@@ -25,14 +25,24 @@ let channelRepairTimer: NodeJS.Timeout | undefined;
 const server = http.createServer(createApp());
 
 async function repairMessagingChannels() {
+  // Never let a transient Meta API check disable inbound routing. Reactivate
+  // previously connected channels immediately, then repair subscriptions.
+  const reactivated = await systemDb.channel.updateMany({
+    where: {
+      type: { in: ["FACEBOOK", "INSTAGRAM"] },
+      status: "ERROR",
+    },
+    data: { status: "CONNECTED" },
+  });
+
   const [instagram, facebook] = await Promise.allSettled([
     repairConnectedInstagramChannels(),
     repairConnectedFacebookChannels(),
   ]);
 
-  // A transient Meta check must never disable inbound routing. Disconnected
-  // channels stay disconnected; only channels previously marked ERROR recover.
-  const reactivated = await systemDb.channel.updateMany({
+  // Instagram's checker may mark a channel ERROR after a temporary API failure.
+  // Restore routing again while preserving lastError for diagnostics.
+  const restoredAfterChecks = await systemDb.channel.updateMany({
     where: {
       type: { in: ["FACEBOOK", "INSTAGRAM"] },
       status: "ERROR",
@@ -50,7 +60,7 @@ async function repairMessagingChannels() {
         facebook.status === "fulfilled"
           ? facebook.value
           : { error: String(facebook.reason) },
-      reactivated: reactivated.count,
+      reactivated: reactivated.count + restoredAfterChecks.count,
     },
     "Meta messaging channels checked",
   );
