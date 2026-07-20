@@ -87,7 +87,7 @@ async function processInboundDirectly(eventId: string) {
   }
 }
 
-export async function enqueueInbound(eventId: string, force = false) {
+async function enqueueWithRedis(eventId: string, force: boolean) {
   try {
     if (force) {
       const old = await inboundQueue.getJob(eventId);
@@ -98,16 +98,19 @@ export async function enqueueInbound(eventId: string, force = false) {
     }
     await inboundQueue.add("process", { eventId }, { jobId: eventId });
   } catch (error) {
-    // Meta must still receive HTTP 200 when Redis is waking up. The same event
-    // is processed below inside the web process and remains recoverable in DB.
+    // The webhook has already been persisted in Postgres. Redis is only an
+    // accelerator now, so a sleeping free-tier instance cannot stop replies.
     logger.error(
       { err: error, eventId },
       "inbound queue unavailable; using direct processing",
     );
   }
+}
 
-  // Always race the queue with an in-process path. processInboundEvent has an
-  // atomic database claim, so only one runner can process the event.
+export async function enqueueInbound(eventId: string, force = false) {
+  // Do not make Meta wait for Redis. Queue insertion and direct processing run
+  // after this function resolves, allowing the webhook endpoint to answer 200.
+  void enqueueWithRedis(eventId, force);
   setImmediate(() => {
     void processInboundDirectly(eventId);
   });
