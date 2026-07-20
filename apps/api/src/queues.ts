@@ -57,13 +57,58 @@ whatsappOutboundQueue.on("error", (error) =>
   logger.error({ err: error, queue: "whatsapp-outbound" }, "queue error"),
 );
 
-export async function enqueueInbound(eventId: string, force = false) {
-  if (force) {
-    const old = await inboundQueue.getJob(eventId);
-    if (old) {
-      const state = await old.getState();
-      if (state === "failed" || state === "completed") await old.remove();
+const directEvents = new Set<string>();
+
+async function processInboundDirectly(eventId: string) {
+  if (directEvents.has(eventId)) return;
+  directEvents.add(eventId);
+  try {
+    const { processInboundEvent, sendFallbackForEvent } = await import(
+      "./services/inbound.js"
+    );
+    try {
+      await processInboundEvent(eventId);
+    } catch (error) {
+      logger.error({ err: error, eventId }, "direct inbound processing failed");
+      const { systemDb } = await import("./db.js");
+      const event = await systemDb.webhookEvent
+        .findUnique({ where: { id: eventId }, select: { attempts: true } })
+        .catch(() => null);
+      if ((event?.attempts ?? 0) >= 5)
+        await sendFallbackForEvent(eventId).catch((fallbackError) =>
+          logger.error(
+            { err: fallbackError, eventId },
+            "direct inbound fallback failed",
+          ),
+        );
     }
+  } finally {
+    directEvents.delete(eventId);
   }
-  await inboundQueue.add("process", { eventId }, { jobId: eventId });
+}
+
+export async function enqueueInbound(eventId: string, force = false) {
+  try {
+    if (force) {
+      const old = await inboundQueue.getJob(eventId);
+      if (old) {
+        const state = await old.getState();
+        if (state === "failed" || state === "completed") await old.remove();
+      }
+    }
+    await inboundQueue.add("process", { eventId }, { jobId: eventId });
+  } catch (error) {
+    // Meta must still receive HTTP 200 when Redis is waking up. The same event
+    // is processed below inside the web process and remains recoverable in DB.
+    logger.error(
+      { err: error, eventId },
+      "inbound queue unavailable; using direct processing",
+    );
+  }
+
+  // Always race the queue with an in-process path. processInboundEvent has an
+  // atomic database claim, so only one runner can process the event.
+  setImmediate(() => {
+    void processInboundDirectly(eventId);
+  });
 }
