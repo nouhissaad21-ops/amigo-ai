@@ -57,6 +57,15 @@ export type InstagramProbeResult = {
   failures: string[];
 };
 
+// Meta's list endpoint should return lightweight message records. Full content
+// is fetched separately from the message-details endpoint.
+export const INSTAGRAM_CONVERSATION_MESSAGE_FIELDS =
+  "messages.limit(20){id,created_time,is_unsupported}";
+export const INSTAGRAM_MESSAGE_DETAIL_FIELDS =
+  "id,created_time,from,to,message";
+
+const INITIAL_CATCHUP_MS = 24 * 60 * 60_000;
+const OVERLAP_MS = 2 * 60_000;
 const lastSuccessfulPoll = new Map<string, number>();
 let polling = false;
 
@@ -69,7 +78,7 @@ function graphUrl(host: "instagram" | "facebook", path: string) {
 async function graphJson<T>(url: URL, token: string): Promise<T> {
   const response = await fetch(url, {
     headers: { authorization: `Bearer ${token}` },
-    signal: AbortSignal.timeout(7_000),
+    signal: AbortSignal.timeout(9_000),
   });
   const raw = await response.text();
   let data: T & GraphError;
@@ -136,12 +145,16 @@ function graphCandidates(channel: Channel, credentials: InstagramCredentials) {
     candidates.push({ key, host, accountId, token, platformParam });
   };
 
-  // Meta's Conversations API documents platform=instagram for both login modes.
+  // Instagram Login: use the professional-account ID first, then /me.
   add("instagram-user", "instagram", instagramId, instagramToken, true);
   add("instagram-me", "instagram", "me", instagramToken, true);
 
-  // Facebook Login/Page-linked accounts use a Page access token. Meta has
-  // supported both Page ID and IG professional-account ID shapes over time.
+  // Some Graph versions accept the same endpoints without platform=instagram.
+  // Keep these as compatibility fallbacks, after the documented candidates.
+  add("instagram-user-direct", "instagram", instagramId, instagramToken, false);
+  add("instagram-me-direct", "instagram", "me", instagramToken, false);
+
+  // Facebook Login/Page-linked mode uses a Page token and platform=instagram.
   add("facebook-page", "facebook", pageId, pageToken, true);
   add("facebook-instagram-user", "facebook", instagramId, pageToken, true);
 
@@ -161,7 +174,7 @@ async function fetchConversationSources(
     const url = graphUrl(candidate.host, `${candidate.accountId}/conversations`);
     if (candidate.platformParam) url.searchParams.set("platform", "instagram");
     url.searchParams.set("fields", "id,updated_time");
-    url.searchParams.set("limit", "25");
+    url.searchParams.set("limit", "50");
     try {
       const result = await graphJson<{ data?: Conversation[] }>(
         url,
@@ -180,8 +193,8 @@ async function fetchConversationSources(
       failures[0] ?? "Instagram Conversations API is unavailable",
     );
 
-  // Never stop on the first successful-but-empty endpoint. Meta can return an
-  // empty Page conversation list while the IG-specific endpoint has messages.
+  // Do not stop on a successful-but-empty alias. Another supported endpoint can
+  // contain the real inbox for the same account.
   sources.sort((a, b) => b.conversations.length - a.conversations.length);
   return { sources, failures };
 }
@@ -225,10 +238,10 @@ async function messageDetails(
   message: InstagramMessage,
   candidate: GraphCandidate,
 ): Promise<InstagramMessage> {
-  if ((message.message || message.text) && message.from?.id) return message;
+  if (message.message && message.from?.id) return message;
   if (!message.id) return message;
   const url = graphUrl(candidate.host, message.id);
-  url.searchParams.set("fields", "id,created_time,from,to,message,text");
+  url.searchParams.set("fields", INSTAGRAM_MESSAGE_DETAIL_FIELDS);
   return graphJson<InstagramMessage>(url, candidate.token);
 }
 
@@ -236,8 +249,8 @@ function inboundCustomer(
   message: InstagramMessage,
   aliases: Set<string>,
 ): MessageParticipant | undefined {
-  // The sender is authoritative. Looking at `to` made our own outbound replies
-  // appear as inbound customer messages and could create reply loops.
+  // The sender is authoritative. Inspecting recipients can turn our own sent
+  // replies into inbound messages and create loops.
   const sender = message.from;
   if (!sender?.id || aliases.has(String(sender.id))) return undefined;
   return sender;
@@ -284,6 +297,19 @@ async function persistPolledMessage(
   }
 }
 
+async function pollWindowStart(channelId: string) {
+  const memory = lastSuccessfulPoll.get(channelId);
+  if (memory) return memory;
+
+  const floor = Date.now() - INITIAL_CATCHUP_MS;
+  const latest = await systemDb.webhookEvent.findFirst({
+    where: { channelId, provider: "META_MESSAGE" },
+    orderBy: { createdAt: "desc" },
+    select: { createdAt: true },
+  });
+  return Math.max(floor, (latest?.createdAt.getTime() ?? floor) - OVERLAP_MS);
+}
+
 export async function pollInstagramChannelNow(channel: Channel) {
   const credentials = decryptJson<InstagramCredentials>(
     channel.credentialsEncrypted,
@@ -293,8 +319,7 @@ export async function pollInstagramChannelNow(channel: Channel) {
     credentials,
   );
   const aliases = accountAliases(channel, credentials);
-  const since =
-    lastSuccessfulPoll.get(channel.id) ?? Date.now() - 5 * 60_000;
+  const since = await pollWindowStart(channel.id);
   const seenMessages = new Set<string>();
   let captured = 0;
 
@@ -302,12 +327,12 @@ export async function pollInstagramChannelNow(channel: Channel) {
     for (const conversation of source.conversations) {
       if (!conversation.id) continue;
       const updatedAt = Date.parse(conversation.updated_time ?? "");
-      if (Number.isFinite(updatedAt) && updatedAt < since - 60_000) continue;
+      if (Number.isFinite(updatedAt) && updatedAt < since - OVERLAP_MS) continue;
 
       const detailsUrl = graphUrl(source.candidate.host, conversation.id);
       detailsUrl.searchParams.set(
         "fields",
-        "messages.limit(20){id,created_time,from,to,message,text,is_unsupported}",
+        INSTAGRAM_CONVERSATION_MESSAGE_FIELDS,
       );
       let details: ConversationDetails;
       try {
@@ -323,7 +348,7 @@ export async function pollInstagramChannelNow(channel: Channel) {
             source: source.candidate.key,
             conversationId: conversation.id,
           },
-          "Instagram conversation detail probe failed",
+          "Instagram conversation message list failed",
         );
         continue;
       }
@@ -338,14 +363,16 @@ export async function pollInstagramChannelNow(channel: Channel) {
         seenMessages.add(compact.id);
 
         const createdAt = Date.parse(compact.created_time ?? "");
-        if (Number.isFinite(createdAt) && createdAt < since - 60_000) continue;
+        if (Number.isFinite(createdAt) && createdAt < since - OVERLAP_MS)
+          continue;
+
         let message: InstagramMessage;
         try {
           message = await messageDetails(compact, source.candidate);
         } catch (error) {
           logger.debug(
             { err: error, channelId: channel.id, messageId: compact.id },
-            "Instagram message detail probe failed",
+            "Instagram message detail failed",
           );
           continue;
         }
@@ -356,7 +383,7 @@ export async function pollInstagramChannelNow(channel: Channel) {
     }
   }
 
-  lastSuccessfulPoll.set(channel.id, Date.now() - 10_000);
+  lastSuccessfulPoll.set(channel.id, Date.now() - 30_000);
   await systemDb.channel
     .update({
       where: { id: channel.id },
