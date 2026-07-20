@@ -4,12 +4,40 @@ export type Channel = {
   name: string;
   status: "PENDING" | "CONNECTED" | "DISCONNECTED" | "ERROR";
   externalAccountId: string;
+  lastConnectedAt?: string | null;
   lastError: string | null;
   whatsappSession?: {
     qrCodeDataUrl: string | null;
     phoneJid: string | null;
   } | null;
 };
+
+export type ChannelDiagnosticCheck = {
+  key: string;
+  label: string;
+  state: "PASS" | "WARN" | "FAIL" | "INFO";
+  summary: string;
+  detail?: string;
+};
+
+export type ChannelDiagnostics = {
+  channelId: string;
+  channelType: Channel["type"];
+  overall: "READY" | "DEGRADED" | "BLOCKED";
+  checkedAt: string;
+  checks: ChannelDiagnosticCheck[];
+  activity: {
+    lastWebhookAt: string | null;
+    lastWebhookStatus: string | null;
+    lastInboundAt: string | null;
+    lastOutboundAt: string | null;
+    lastOutboundStatus: string | null;
+    failedWebhookEvents: number;
+    queuedOutboundMessages: number;
+  };
+  recommendations: string[];
+};
+
 export type Variant = {
   id?: string;
   sku: string;

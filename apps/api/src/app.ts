@@ -16,9 +16,11 @@ import { cacheRedis } from "./queues.js";
 import { redisRateLimit } from "./rate-limit.js";
 import { adminRouter } from "./routes/admin.js";
 import { authRouter } from "./routes/auth.js";
+import { channelDiagnosticsRouter } from "./routes/channel-diagnostics.js";
 import { dashboardRouter } from "./routes/dashboard.js";
 import { integrationsRouter } from "./routes/integrations.js";
 import { metaWebhookRouter, whatsappWebhookRouter } from "./routes/webhooks.js";
+
 export function createApp() {
   const app = express();
   app.set("trust proxy", env.TRUST_PROXY_HOPS);
@@ -31,27 +33,27 @@ export function createApp() {
     }),
   );
   app.use(
-  helmet({
-    contentSecurityPolicy: {
-      directives: {
-        defaultSrc: ["'self'"],
-        baseUri: ["'none'"],
-        connectSrc: ["'self'"],
-        fontSrc: ["'self'", "data:"],
-        formAction: ["'self'"],
-        frameAncestors: ["'none'"],
-        imgSrc: ["'self'", "data:", "blob:"],
-        objectSrc: ["'none'"],
-        scriptSrc: ["'self'", "'unsafe-inline'"],
-        scriptSrcAttr: ["'none'"],
-        styleSrc: ["'self'", "'unsafe-inline'"],
-        upgradeInsecureRequests: [],
+    helmet({
+      contentSecurityPolicy: {
+        directives: {
+          defaultSrc: ["'self'"],
+          baseUri: ["'none'"],
+          connectSrc: ["'self'"],
+          fontSrc: ["'self'", "data:"],
+          formAction: ["'self'"],
+          frameAncestors: ["'none'"],
+          imgSrc: ["'self'", "data:", "blob:"],
+          objectSrc: ["'none'"],
+          scriptSrc: ["'self'", "'unsafe-inline'"],
+          scriptSrcAttr: ["'none'"],
+          styleSrc: ["'self'", "'unsafe-inline'"],
+          upgradeInsecureRequests: [],
+        },
       },
-    },
-    crossOriginResourcePolicy: { policy: "same-site" },
-    referrerPolicy: { policy: "strict-origin-when-cross-origin" },
-  }),
-);
+      crossOriginResourcePolicy: { policy: "same-site" },
+      referrerPolicy: { policy: "strict-origin-when-cross-origin" },
+    }),
+  );
   app.use(
     cors({
       origin: env.WEB_ORIGIN,
@@ -82,6 +84,7 @@ export function createApp() {
     app.use(`${prefix}/admin`, adminRouter);
     app.use(`${prefix}/integrations`, integrationsRouter);
     app.use(`${prefix}/dashboard`, dashboardRouter);
+    app.use(`${prefix}/channel-diagnostics`, channelDiagnosticsRouter);
   }
   if (env.SERVE_STATIC_WEB) {
     const staticDirectory = path.resolve(env.STATIC_WEB_DIR);
