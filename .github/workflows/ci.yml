@@ -19,11 +19,4 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Run checks
-        run: npm run check 2>&1 | tee check.log
-      - name: Upload check log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: check-log
-          path: check.log
+      - run: npm run check
