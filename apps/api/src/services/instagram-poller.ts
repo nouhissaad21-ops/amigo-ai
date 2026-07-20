@@ -304,10 +304,10 @@ async function pollWindowStart(channelId: string) {
   const floor = Date.now() - INITIAL_CATCHUP_MS;
   const latest = await systemDb.webhookEvent.findFirst({
     where: { channelId, provider: "META_MESSAGE" },
-    orderBy: { createdAt: "desc" },
-    select: { createdAt: true },
+    orderBy: { receivedAt: "desc" },
+    select: { receivedAt: true },
   });
-  return Math.max(floor, (latest?.createdAt.getTime() ?? floor) - OVERLAP_MS);
+  return Math.max(floor, (latest?.receivedAt.getTime() ?? floor) - OVERLAP_MS);
 }
 
 export async function pollInstagramChannelNow(channel: Channel) {
