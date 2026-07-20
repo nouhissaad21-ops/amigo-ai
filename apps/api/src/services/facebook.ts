@@ -1,3 +1,4 @@
+import "./instagram-poller-runtime.js";
 import { env } from "../config.js";
 import { systemDb } from "../db.js";
 import { logger } from "../logger.js";
@@ -33,6 +34,7 @@ async function repairFacebookChannel(channel: {
   const response = await fetch(url, {
     method: "POST",
     headers: { authorization: `Bearer ${credentials.accessToken}` },
+    signal: AbortSignal.timeout(8_000),
   });
   const data = (await response.json().catch(() => ({}))) as MetaErrorBody;
   if (!response.ok || data.error || data.success === false)
@@ -69,8 +71,6 @@ export async function repairConnectedFacebookChannels() {
       await systemDb.channel
         .update({
           where: { id: channel.id },
-          // Keep routing active. A transient subscription check must not disable
-          // a page that may still be delivering valid webhook events.
           data: { status: "CONNECTED", lastError: message.slice(0, 1000) },
         })
         .catch(() => {});
