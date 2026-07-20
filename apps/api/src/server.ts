@@ -11,6 +11,7 @@ import {
   whatsappOutboundQueue,
 } from "./queues.js";
 import { repairConnectedFacebookChannels } from "./services/facebook.js";
+import { pollConnectedInstagramChannels } from "./services/instagram-poller.js";
 import { repairConnectedInstagramChannels } from "./services/instagram.js";
 import { startInboundWorker } from "./worker-runtime.js";
 
@@ -20,6 +21,7 @@ let inboundWorker: InboundWorker | undefined;
 let isStopping = false;
 let workerRetryTimer: NodeJS.Timeout | undefined;
 let recoveryTimer: NodeJS.Timeout | undefined;
+let instagramPollTimer: NodeJS.Timeout | undefined;
 let channelRepairTimer: NodeJS.Timeout | undefined;
 
 const server = http.createServer(createApp());
@@ -93,17 +95,31 @@ server.listen(env.PORT, "0.0.0.0", () => {
   void repairMessagingChannels().catch((error: unknown) => {
     logger.error({ err: error }, "Meta startup repair failed");
   });
+  void pollConnectedInstagramChannels().catch((error: unknown) => {
+    logger.error({ err: error }, "Instagram startup inbox poll failed");
+  });
   void recoverInboundEventsDirectly().catch((error: unknown) => {
     logger.error({ err: error }, "direct inbound startup recovery failed");
   });
   void startWorkerWithRetry();
 
+  // Keep a database-backed recovery path active even when Redis is unavailable.
+  // A shorter interval prevents customer replies from waiting 30 seconds.
   recoveryTimer = setInterval(() => {
     void recoverInboundEventsDirectly().catch((error: unknown) => {
       logger.error({ err: error }, "direct inbound recovery failed");
     });
-  }, 30_000);
+  }, 10_000);
   recoveryTimer.unref();
+
+  // Meta webhooks remain the primary real-time path. Polling is the production
+  // fallback for Instagram accounts where Meta does not deliver webhook events.
+  instagramPollTimer = setInterval(() => {
+    void pollConnectedInstagramChannels().catch((error: unknown) => {
+      logger.error({ err: error }, "periodic Instagram inbox poll failed");
+    });
+  }, 10_000);
+  instagramPollTimer.unref();
 
   channelRepairTimer = setInterval(() => {
     void repairMessagingChannels().catch((error: unknown) => {
@@ -119,6 +135,7 @@ async function stop(signal: string) {
   logger.info({ signal }, "stopping API");
   if (workerRetryTimer) clearTimeout(workerRetryTimer);
   if (recoveryTimer) clearInterval(recoveryTimer);
+  if (instagramPollTimer) clearInterval(instagramPollTimer);
   if (channelRepairTimer) clearInterval(channelRepairTimer);
 
   server.close(async () => {
