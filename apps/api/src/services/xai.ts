@@ -1,4 +1,3 @@
-import crypto from "node:crypto";
 import { AppError } from "../errors.js";
 import { env } from "../config.js";
 import { createOrderTool, requestOrderDetailsTool } from "../prompt.js";
@@ -6,212 +5,114 @@ import { orderToolSchema } from "../schemas.js";
 import { createOrderFromTool, type CreatedOrder } from "./orders.js";
 import { logger } from "../logger.js";
 
-type Msg = { role: "system" | "user" | "assistant"; content: string };
-type Out = {
-  type: string;
-  name?: string;
-  arguments?: string;
-  call_id?: string;
-  content?: Array<{ type: string; text?: string }>;
-  [k: string]: unknown;
+type HistoryMessage = {
+  role: "user" | "assistant";
+  content: string;
 };
-type Resp = { id: string; output: Out[]; status: string; error?: unknown };
-type ToolDef = {
+
+type ChatMessage = {
+  role: "system" | "user" | "assistant" | "tool";
+  content?: string | null;
+  tool_call_id?: string;
+  name?: string;
+  tool_calls?: ToolCall[];
+};
+
+type ToolCall = {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+};
+
+type ChatResponse = {
+  id?: string;
+  choices?: Array<{
+    message?: {
+      role?: string;
+      content?: string | null;
+      tool_calls?: Array<{
+        id?: string;
+        type?: string;
+        function?: { name?: string; arguments?: string };
+      }>;
+    };
+  }>;
+  error?: { message?: string; failed_generation?: unknown };
+};
+
+type ToolDefinition = {
   type: "function";
   name: string;
   description: string;
   parameters: Record<string, unknown>;
 };
-type ChatMessage = {
-  role: "system" | "user" | "assistant" | "tool";
-  content?: string | null;
-  tool_call_id?: string;
-  tool_calls?: Array<{
-    id: string;
-    type: "function";
-    function: { name: string; arguments: string };
-  }>;
+
+type AgentContext = {
+  storeId: string;
+  channelId: string;
+  conversationId: string;
+  eventId: string;
+  systemPrompt: string;
+  history: HistoryMessage[];
 };
-type GroqResponse = {
-  id?: string;
-  choices?: Array<{
-    message?: {
-      content?: string | null;
-      tool_calls?: Array<{
-        id?: string;
-        function?: { name?: string; arguments?: string };
-      }>;
+
+type AgentResult = {
+  text: string;
+  order?: CreatedOrder;
+  orderError?: string;
+};
+
+const localTools = [createOrderTool, requestOrderDetailsTool];
+
+function provider() {
+  if (env.AI_PROVIDER === "groq")
+    return {
+      name: "Groq",
+      apiKey: env.GROQ_API_KEY!,
+      baseUrl: env.GROQ_BASE_URL.replace(/\/$/, ""),
+      model: env.GROQ_MODEL,
     };
-  }>;
-  error?: { message?: string };
-};
-
-const provider = () =>
-  env.AI_PROVIDER === "groq"
-    ? {
-        name: "Groq",
-        apiKey: env.GROQ_API_KEY!,
-        baseUrl: env.GROQ_BASE_URL.replace(/\/$/, ""),
-        model: env.GROQ_MODEL,
-        storeResponses: false,
-      }
-    : {
-        name: "xAI",
-        apiKey: env.XAI_API_KEY!,
-        baseUrl: env.XAI_BASE_URL.replace(/\/$/, ""),
-        model: env.XAI_MODEL,
-        storeResponses: env.XAI_STORE_RESPONSES,
-      };
-
-const text = (r: Resp) =>
-  r.output
-    .filter((x) => x.type === "message")
-    .flatMap((x) => x.content ?? [])
-    .filter((x) => x.type === "output_text")
-    .map((x) => x.text ?? "")
-    .join("\n")
-    .trim();
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-function retryBodies(body: Record<string, unknown>) {
-  const attempts = [body];
-  if (env.AI_PROVIDER !== "groq") return attempts;
-
-  if (body.tool_choice === "required")
-    attempts.push({
-      ...body,
-      tool_choice: "auto",
-      parallel_tool_calls: false,
-      temperature: 0.05,
-    });
-  else if (body.tool_choice === "none") {
-    const withoutTools = { ...body };
-    delete withoutTools.tools;
-    delete withoutTools.tool_choice;
-    attempts.push(withoutTools);
-  }
-
-  return attempts;
-}
-
-function toChatMessages(input: unknown): ChatMessage[] {
-  if (!Array.isArray(input)) return [];
-  const messages: ChatMessage[] = [];
-
-  for (const item of input) {
-    if (!item || typeof item !== "object") continue;
-    const value = item as Record<string, unknown>;
-    const role = value.role;
-    if (
-      (role === "system" || role === "user" || role === "assistant") &&
-      typeof value.content === "string"
-    ) {
-      messages.push({ role, content: value.content });
-      continue;
-    }
-    if (
-      value.type === "function_call" &&
-      typeof value.name === "string" &&
-      typeof value.call_id === "string"
-    ) {
-      messages.push({
-        role: "assistant",
-        content: null,
-        tool_calls: [
-          {
-            id: value.call_id,
-            type: "function",
-            function: {
-              name: value.name,
-              arguments:
-                typeof value.arguments === "string" ? value.arguments : "{}",
-            },
-          },
-        ],
-      });
-      continue;
-    }
-    if (
-      value.type === "function_call_output" &&
-      typeof value.call_id === "string"
-    ) {
-      messages.push({
-        role: "tool",
-        tool_call_id: value.call_id,
-        content: typeof value.output === "string" ? value.output : "{}",
-      });
-    }
-  }
-
-  return messages;
-}
-
-function toChatTools(input: unknown) {
-  if (!Array.isArray(input)) return undefined;
-  return input.flatMap((item) => {
-    if (!item || typeof item !== "object") return [];
-    const tool = item as ToolDef;
-    if (
-      tool.type !== "function" ||
-      typeof tool.name !== "string" ||
-      typeof tool.description !== "string"
-    )
-      return [];
-    return [
-      {
-        type: "function" as const,
-        function: {
-          name: tool.name,
-          description: tool.description,
-          parameters: tool.parameters,
-        },
-      },
-    ];
-  });
-}
-
-function normalizeGroq(data: GroqResponse): Resp {
-  const message = data.choices?.[0]?.message;
-  const output: Out[] = [];
-  const content = message?.content?.trim();
-  if (content)
-    output.push({
-      type: "message",
-      content: [{ type: "output_text", text: content }],
-    });
-  for (const call of message?.tool_calls ?? []) {
-    if (!call.id || !call.function?.name) continue;
-    output.push({
-      type: "function_call",
-      name: call.function.name,
-      arguments: call.function.arguments ?? "{}",
-      call_id: call.id,
-    });
-  }
   return {
-    id: data.id ?? crypto.randomUUID(),
-    output,
-    status: "completed",
-    error: data.error,
+    name: "xAI",
+    apiKey: env.XAI_API_KEY!,
+    baseUrl: env.XAI_BASE_URL.replace(/\/$/, ""),
+    model: env.XAI_MODEL,
   };
 }
 
-async function callGroq(body: Record<string, unknown>): Promise<Resp> {
+function toolsForApi() {
+  return localTools.map((tool: ToolDefinition) => ({
+    type: "function" as const,
+    function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters,
+    },
+  }));
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function callChat(input: {
+  messages: ChatMessage[];
+  toolChoice: "auto" | "required" | "none";
+  temperature: number;
+  maxTokens: number;
+}): Promise<{ text: string; toolCall?: ToolCall; assistant: ChatMessage }> {
   const p = provider();
   const requestBody: Record<string, unknown> = {
     model: p.model,
-    messages: toChatMessages(body.input),
-    temperature: body.temperature,
-    max_tokens: body.max_output_tokens,
+    messages: input.messages,
+    temperature: input.temperature,
+    max_tokens: input.maxTokens,
+    tool_choice: input.toolChoice,
+    parallel_tool_calls: false,
   };
-  const tools = toChatTools(body.tools);
-  if (tools?.length) requestBody.tools = tools;
-  if (body.tool_choice !== undefined)
-    requestBody.tool_choice = body.tool_choice;
-  if (body.parallel_tool_calls !== undefined)
-    requestBody.parallel_tool_calls = body.parallel_tool_calls;
+  if (input.toolChoice !== "none") requestBody.tools = toolsForApi();
 
+  let lastError = "AI request failed";
   let lastStatus = 502;
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
@@ -222,171 +123,227 @@ async function callGroq(body: Record<string, unknown>): Promise<Resp> {
           "content-type": "application/json",
         },
         body: JSON.stringify(requestBody),
-        signal: AbortSignal.timeout(Math.min(env.AI_TIMEOUT_MS, 12_000)),
+        signal: AbortSignal.timeout(
+          Math.min(env.AI_TIMEOUT_MS, attempt === 1 ? 7_000 : 4_000),
+        ),
       });
       const raw = await response.text();
       lastStatus = response.status;
       if (!response.ok) {
+        lastError = raw.slice(0, 1000);
         logger.warn(
           {
             provider: p.name,
             status: response.status,
             attempt,
-            detail: raw.slice(0, 1000),
+            detail: lastError,
           },
-          "AI provider rejected",
+          "AI provider rejected merchant request",
         );
         if (attempt === 1 && (response.status === 429 || response.status >= 500)) {
-          await sleep(250);
+          await sleep(180);
           continue;
         }
         break;
       }
-      const data = JSON.parse(raw) as GroqResponse;
-      const normalized = normalizeGroq(data);
-      if (normalized.output.length) return normalized;
-      logger.warn({ provider: p.name, attempt }, "AI returned empty choices");
-      break;
+
+      const data = JSON.parse(raw) as ChatResponse;
+      const message = data.choices?.[0]?.message;
+      if (!message) {
+        lastError = "empty choices";
+        break;
+      }
+      const rawCall = message.tool_calls?.[0];
+      const toolCall =
+        rawCall?.id && rawCall.function?.name
+          ? {
+              id: rawCall.id,
+              type: "function" as const,
+              function: {
+                name: rawCall.function.name,
+                arguments: rawCall.function.arguments ?? "{}",
+              },
+            }
+          : undefined;
+      const assistant: ChatMessage = {
+        role: "assistant",
+        content: message.content ?? null,
+        ...(toolCall ? { tool_calls: [toolCall] } : {}),
+      };
+      const text = String(message.content ?? "").trim();
+      if (!text && !toolCall) {
+        lastError = "empty response";
+        break;
+      }
+      return { text, toolCall, assistant };
     } catch (error) {
+      lastError = error instanceof Error ? error.message : "request failed";
       logger.warn(
-        {
-          provider: p.name,
-          attempt,
-          detail: error instanceof Error ? error.message : "request failed",
-        },
-        "AI provider request failed",
+        { provider: p.name, attempt, detail: lastError },
+        "AI merchant request failed",
       );
-      break;
+      if (attempt === 1) {
+        await sleep(120);
+        continue;
+      }
     }
   }
 
   throw new AppError(
     502,
     lastStatus === 400 ? "AI_TOOL_CALL_REJECTED" : "AI_PROVIDER_ERROR",
-    "خدمة الذكاء الاصطناعي غير متاحة",
+    lastError,
   );
 }
 
-async function callResponses(body: Record<string, unknown>): Promise<Resp> {
-  const p = provider();
-  const response = await fetch(`${p.baseUrl}/responses`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${p.apiKey}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(env.AI_TIMEOUT_MS),
-  });
-  if (!response.ok) {
-    const detail = (await response.text()).slice(0, 1000);
-    logger.warn(
-      { provider: p.name, status: response.status, detail },
-      "AI provider rejected",
-    );
-    throw new AppError(
-      502,
-      "AI_PROVIDER_ERROR",
-      "خدمة الذكاء الاصطناعي غير متاحة",
-    );
-  }
-  const result = (await response.json()) as Resp;
-  if (result.status !== "completed" || result.error)
-    throw new AppError(502, "AI_INCOMPLETE", "لم يكتمل الرد");
-  return result;
-}
-
-async function call(body: Record<string, unknown>): Promise<Resp> {
-  let lastError: unknown;
-  for (const candidate of retryBodies(body)) {
-    try {
-      return env.AI_PROVIDER === "groq"
-        ? await callGroq(candidate)
-        : await callResponses(candidate);
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  throw lastError instanceof Error
-    ? lastError
-    : new AppError(
-        502,
-        "AI_PROVIDER_ERROR",
-        "خدمة الذكاء الاصطناعي غير متاحة",
-      );
-}
-
-const tools = [createOrderTool, requestOrderDetailsTool];
-
-function functionCall(response: Resp) {
-  return response.output.find((item) => item.type === "function_call");
-}
-
-function userMessages(
-  history: Array<{ role: "user" | "assistant"; content: string }>,
-) {
+function userMessages(history: HistoryMessage[]) {
   return history
     .filter((message) => message.role === "user")
     .map((message) => message.content.trim())
     .filter(Boolean);
 }
 
-function quickReply(
-  history: Array<{ role: "user" | "assistant"; content: string }>,
-) {
-  const latest = userMessages(history).at(-1)?.toLowerCase() ?? "";
-  const clean = latest
+function latestUserMessage(history: HistoryMessage[]) {
+  return userMessages(history).at(-1) ?? "";
+}
+
+function normalizedShortText(value: string) {
+  return value
+    .toLowerCase()
     .replace(/[.!؟?،,;:ـ_]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-  if (
-    /^(سلام|السلام عليكم|سلام عليكم|salam|salem|bonjour|bonsoir|hello|hi)$/.test(
-      clean,
-    )
-  )
-    return "وعليكم السلام 😊 مرحبا بيك، واش حاب تعرف على منتجاتنا؟";
-  if (/^(شكرا|شكراً|merci|thanks|thank you)$/.test(clean))
-    return "العفو، مرحبا بيك دايماً 😊";
+}
+
+function quickReply(history: HistoryMessage[]) {
+  const clean = normalizedShortText(latestUserMessage(history));
+  if (!clean || clean.split(" ").length > 4) return undefined;
+
+  if (/^(السلام عليكم|سلام عليكم|سلام|salam|salem)$/.test(clean))
+    return "وعليكم السلام 😊 مرحبا بيك! قولّي برك واش حاب تعرف ونعاونك.";
+  if (/^(bonjour|bonsoir|salut|coucou)$/.test(clean))
+    return "Bonjour 😊 Bienvenue ! Dites-moi ce que vous cherchez et je vous aide.";
+  if (/^(hello|hi|hey|good morning|good evening)$/.test(clean))
+    return "Hi 😊 Welcome! Tell me what you're looking for and I'll help.";
+  if (/^(hola|buenos días|buenas tardes)$/.test(clean))
+    return "¡Hola! 😊 Dime qué estás buscando y te ayudo.";
+  if (/^(hallo|guten tag|guten morgen)$/.test(clean))
+    return "Hallo 😊 Sag mir einfach, wonach du suchst, und ich helfe dir.";
+  if (/^(ciao|buongiorno|buonasera)$/.test(clean))
+    return "Ciao 😊 Dimmi cosa stai cercando e ti aiuto.";
+  if (/^(merhaba|selam|günaydın)$/.test(clean))
+    return "Merhaba 😊 Ne aradığınızı söyleyin, hemen yardımcı olayım.";
+
+  if (/^(شكرا|شكراً|بارك الله فيك)$/.test(clean))
+    return "العفو، مرحبا بيك في أي وقت 😊";
+  if (/^(merci|merci beaucoup)$/.test(clean))
+    return "Avec plaisir 😊";
+  if (/^(thanks|thank you|thx)$/.test(clean)) return "You're welcome 😊";
+  if (/^(gracias|muchas gracias)$/.test(clean)) return "¡Con gusto! 😊";
+  if (/^(danke|vielen dank)$/.test(clean)) return "Gern geschehen 😊";
+  if (/^(grazie|grazie mille)$/.test(clean)) return "Con piacere 😊";
+  if (/^(teşekkürler|teşekkür ederim)$/.test(clean)) return "Rica ederim 😊";
   return undefined;
 }
 
-function orderDecisionNeeded(
-  history: Array<{ role: "user" | "assistant"; content: string }>,
-) {
-  const messages = userMessages(history);
-  const latest = messages.at(-1) ?? "";
-  const all = messages.join(" \n ");
-  const compact = all.replace(/[\s-]/g, "");
-  const hasPhone = /(?:^|\D)0[567]\d{8}(?:\D|$)/.test(compact);
-  const hasOrderIntent =
-    /(طلبية|نطلب|نحب ندي|نحب نشري|دير(?:لي)? الطلب|سجل(?:لي)? الطلب|ثبت(?:لي)? الطلب|commande|commander|acheter|confirm(?:e|er)?)/i.test(
-      all,
-    );
-  const latestIsConfirmation =
-    /^(نعم|ايه|إيه|اه|oui|ok|موافق|أكد|نأكد|صح|ديرها|ثبتها|سجلها|تمام)(?:\s|[.!،])*$/i.test(
-      latest,
-    );
-  return hasOrderIntent || (hasPhone && latestIsConfirmation);
+function detectLanguage(value: string) {
+  const lower = value.toLowerCase();
+  if (/[\u0600-\u06ff]/.test(value)) return "ar";
+  if (/\b(bonjour|bonsoir|salut|prix|combien|livraison|commande|produit|merci)\b/.test(lower))
+    return "fr";
+  if (/\b(hola|precio|envío|pedido|producto|gracias)\b/.test(lower)) return "es";
+  if (/\b(hallo|preis|lieferung|bestellung|produkt|danke)\b/.test(lower)) return "de";
+  if (/\b(ciao|prezzo|spedizione|ordine|prodotto|grazie)\b/.test(lower)) return "it";
+  if (/\b(merhaba|fiyat|teslimat|sipariş|ürün|teşekkür)\b/.test(lower)) return "tr";
+  return "en";
 }
 
-function safeProviderFallback(
-  history: Array<{ role: "user" | "assistant"; content: string }>,
-) {
-  if (orderDecisionNeeded(history))
-    return "نكمّل معاك الطلبية، ابعثلي في رسالة وحدة الاسم، الهاتف، الولاية، البلدية، المنتج والكمية ونوع التوصيل.";
-  return "مرحبا بيك 😊 قولّي اسم المنتج أو واش حاب تعرف، ونعاونك مباشرة.";
-}
-
-function claimsOrderWasCreated(value: string) {
-  return /(تسج[ّ]?لت.*طلبي|تم.*(?:تسجيل|تأكيد).*طلبي|رقم الطلب(?:ية)?|order\s*(?:number|#)|commande.*(?:enregistr|confirm))/i.test(
+function orderIntent(value: string) {
+  return /(طلبية|نطلب|نحب ندي|نحب نشري|دير(?:لي)? الطلب|سجل(?:لي)? الطلب|ثبت(?:لي)? الطلب|commande|commander|acheter|je le prends|je confirme|order it|place (?:the )?order|i(?:'|’)ll take it|buy it|pedido|comprar|bestellung|bestellen|ordine|ordinare|sipariş)/i.test(
     value,
   );
 }
 
-function missingDetailsQuestion(fc: Out) {
-  if (fc.name !== "request_order_details" || !fc.arguments) return undefined;
+function confirmation(value: string) {
+  return /^(نعم|ايه|إيه|اه|oui|ok|okay|موافق|أكد|نأكد|صح|ديرها|ثبتها|سجلها|تمام|yes|confirm|confirmed|vale|sí|si|ja|bestätigen|confermo|evet|onayla)(?:\s|[.!،])*$/i.test(
+    value.trim(),
+  );
+}
+
+function orderDecisionNeeded(history: HistoryMessage[]) {
+  const latest = latestUserMessage(history);
+  if (!latest) return false;
+  if (orderIntent(latest)) return true;
+
+  const recent = history.slice(-8);
+  const assistantContext = recent
+    .filter((message) => message.role === "assistant")
+    .map((message) => message.content)
+    .join(" ");
+  const userContext = recent
+    .filter((message) => message.role === "user")
+    .map((message) => message.content)
+    .join(" ");
+  const assistantWasCollectingOrder =
+    /(الاسم|الهاتف|الولاية|البلدية|التوصيل|أكد|confirmation|nom|téléphone|wilaya|commune|livraison|name|phone|address|delivery|confirm|pedido|bestellung|ordine|sipariş)/i.test(
+      assistantContext,
+    );
+  const latestHasOrderData =
+    /(?:^|\D)0[567]\d{8}(?:\D|$)/.test(latest.replace(/[\s-]/g, "")) ||
+    /(home|desk|domicile|bureau|المنزل|المكتب|البلدية|ولاية|wilaya|commune)/i.test(
+      latest,
+    );
+  return (
+    (confirmation(latest) && (assistantWasCollectingOrder || orderIntent(userContext))) ||
+    (latestHasOrderData && assistantWasCollectingOrder)
+  );
+}
+
+function fallbackReply(history: HistoryMessage[]) {
+  const latest = latestUserMessage(history);
+  const wantsOrder = orderDecisionNeeded(history);
+  switch (detectLanguage(latest)) {
+    case "ar":
+      return wantsOrder
+        ? "نكمل معاك الطلبية. ابعثلي المعلومة الناقصة فقط ونثبتها مباشرة."
+        : "قولّي واش حاب تعرف بالضبط، ونمدّلك المعلومة مباشرة.";
+    case "fr":
+      return wantsOrder
+        ? "On continue la commande. Envoyez-moi seulement l’information manquante et je la confirme."
+        : "Dites-moi précisément ce que vous cherchez et je vous réponds directement.";
+    case "es":
+      return wantsOrder
+        ? "Seguimos con el pedido. Envíame solo el dato que falta y lo confirmo."
+        : "Dime exactamente qué buscas y te respondo directamente.";
+    case "de":
+      return wantsOrder
+        ? "Wir setzen die Bestellung fort. Schick mir nur die fehlende Angabe."
+        : "Sag mir bitte genau, was du suchst, dann helfe ich direkt.";
+    case "it":
+      return wantsOrder
+        ? "Continuiamo con l’ordine. Inviami solo il dato mancante."
+        : "Dimmi esattamente cosa cerchi e ti rispondo subito.";
+    case "tr":
+      return wantsOrder
+        ? "Siparişe devam edelim. Sadece eksik bilgiyi gönderin."
+        : "Tam olarak ne aradığınızı söyleyin, doğrudan yardımcı olayım.";
+    default:
+      return wantsOrder
+        ? "Let's continue the order. Send only the missing detail and I'll confirm it."
+        : "Tell me exactly what you're looking for and I'll help directly.";
+  }
+}
+
+function claimsOrderWasCreated(value: string) {
+  return /(تسج[ّ]?لت.*طلبي|تم.*(?:تسجيل|تأكيد).*طلبي|رقم الطلب(?:ية)?|order\s*(?:number|#)|order.*(?:placed|confirmed)|commande.*(?:enregistr|confirm)|pedido.*confirm|bestellung.*bestät|ordine.*conferm|sipariş.*onay)/i.test(
+    value,
+  );
+}
+
+function missingDetailsQuestion(call: ToolCall) {
+  if (call.function.name !== "request_order_details") return undefined;
   try {
-    const parsed = JSON.parse(fc.arguments) as {
+    const parsed = JSON.parse(call.function.arguments) as {
       missing?: unknown;
       question?: unknown;
     };
@@ -398,203 +355,196 @@ function missingDetailsQuestion(fc: Out) {
     )
       return parsed.question.trim().slice(0, 300);
   } catch {
-    // Fall through to a safe clarification question.
+    // Use a language-aware fallback below.
   }
-  return "باش نثبت الطلبية، زيدلي المعلومة الناقصة من فضلك.";
+  return undefined;
 }
 
-async function orderToolResult(
-  fc: Out,
-  c: {
-    storeId: string;
-    channelId: string;
-    conversationId: string;
-    eventId: string;
-  },
-) {
-  if (fc.name === "request_order_details")
+async function executeTool(call: ToolCall, context: AgentContext) {
+  if (call.function.name === "request_order_details")
     return {
-      question: missingDetailsQuestion(fc),
-      tool: { success: false, needsMoreInformation: true },
+      question: missingDetailsQuestion(call),
+      payload: { success: false, needsMoreInformation: true },
     };
 
-  let order: CreatedOrder | undefined;
   try {
-    if (fc.name !== "create_order" || !fc.arguments) throw new Error();
-    const parsed = orderToolSchema.parse(JSON.parse(fc.arguments));
-    order = await createOrderFromTool({
-      storeId: c.storeId,
-      channelId: c.channelId,
-      conversationId: c.conversationId,
-      idempotencyKey: c.eventId,
+    if (call.function.name !== "create_order") throw new Error("Unknown tool");
+    const parsed = orderToolSchema.parse(JSON.parse(call.function.arguments));
+    const order = await createOrderFromTool({
+      storeId: context.storeId,
+      channelId: context.channelId,
+      conversationId: context.conversationId,
+      idempotencyKey: context.eventId,
       input: parsed,
     });
-    return { order, tool: { success: true, order } };
+    return { order, payload: { success: true, order } };
   } catch (error) {
     const message =
-      error instanceof AppError ? error.message : "بيانات الطلب غير صالحة";
+      error instanceof AppError ? error.message : "Invalid order information";
     logger.warn(
       {
-        eventId: c.eventId,
-        storeId: c.storeId,
-        channelId: c.channelId,
-        toolName: fc.name,
+        eventId: context.eventId,
+        storeId: context.storeId,
+        channelId: context.channelId,
+        toolName: call.function.name,
         error: message,
       },
       "Order tool failed",
     );
-    return {
-      error: message,
-      tool: { success: false, error: message },
-    };
+    return { error: message, payload: { success: false, error: message } };
   }
 }
 
-export async function runMerchantAgent(c: {
-  storeId: string;
-  channelId: string;
-  conversationId: string;
-  eventId: string;
-  systemPrompt: string;
-  history: Array<{ role: "user" | "assistant"; content: string }>;
-}): Promise<{ text: string; order?: CreatedOrder; orderError?: string }> {
-  const instant = quickReply(c.history);
+function deterministicOrderReply(
+  history: HistoryMessage[],
+  result: { order?: CreatedOrder; error?: string },
+) {
+  const language = detectLanguage(latestUserMessage(history));
+  if (result.order) {
+    const number = result.order.orderNumber;
+    const total = result.order.totalAmount;
+    if (language === "fr")
+      return `C’est confirmé ✅ Commande ${number}, total ${total} DZD.`;
+    if (language === "es")
+      return `Pedido confirmado ✅ Número ${number}, total ${total} DZD.`;
+    if (language === "de")
+      return `Bestellung bestätigt ✅ Nummer ${number}, Gesamtbetrag ${total} DZD.`;
+    if (language === "it")
+      return `Ordine confermato ✅ Numero ${number}, totale ${total} DZD.`;
+    if (language === "tr")
+      return `Sipariş onaylandı ✅ Numara ${number}, toplam ${total} DZD.`;
+    if (language === "en")
+      return `Order confirmed ✅ Number ${number}, total ${total} DZD.`;
+    return `تم تأكيد الطلبية ✅ رقمها ${number} والمجموع ${total} دج.`;
+  }
+  if (language === "fr") return "Je n’ai pas pu confirmer la commande. Corrigez-moi l’information manquante.";
+  if (language === "es") return "No pude confirmar el pedido. Corrige el dato que falta.";
+  if (language === "de") return "Ich konnte die Bestellung nicht bestätigen. Bitte korrigiere die fehlende Angabe.";
+  if (language === "it") return "Non sono riuscito a confermare l’ordine. Correggi il dato mancante.";
+  if (language === "tr") return "Siparişi onaylayamadım. Lütfen eksik bilgiyi düzeltin.";
+  if (language === "en") return "I couldn't confirm the order. Please correct the missing detail.";
+  return "ما قدرتش نثبت الطلبية. صححلي المعلومة الناقصة فقط.";
+}
+
+export async function runMerchantAgent(context: AgentContext): Promise<AgentResult> {
+  const instant = quickReply(context.history);
   if (instant) return { text: instant };
 
-  const p = provider();
-  const input: Msg[] = [{ role: "system", content: c.systemPrompt }, ...c.history];
-  let first: Resp;
+  const messages: ChatMessage[] = [
+    { role: "system", content: context.systemPrompt },
+    ...context.history.map((message) => ({
+      role: message.role,
+      content: message.content,
+    })),
+  ];
+
+  let first: Awaited<ReturnType<typeof callChat>>;
   try {
-    first = await call({
-      model: p.model,
-      input,
-      tools,
-      tool_choice: "auto",
-      parallel_tool_calls: false,
-      ...(env.AI_PROVIDER === "xai" ? { store: p.storeResponses } : {}),
-      temperature: 0.2,
-      max_output_tokens: 450,
+    first = await callChat({
+      messages,
+      toolChoice: "auto",
+      temperature: 0.38,
+      maxTokens: 420,
     });
   } catch (error) {
     logger.warn(
-      { err: error, eventId: c.eventId, provider: p.name },
-      "Using fast merchant fallback after AI failure",
+      { err: error, eventId: context.eventId },
+      "Using language-aware merchant fallback",
     );
     return {
-      text: safeProviderFallback(c.history),
+      text: fallbackReply(context.history),
       orderError: "AI_TEMPORARY_FALLBACK",
     };
   }
 
-  let source = first;
-  let fc = functionCall(first);
-  const needsOrderDecision = !fc && orderDecisionNeeded(c.history);
-  if (needsOrderDecision) {
+  let response = first;
+  if (!response.toolCall && orderDecisionNeeded(context.history)) {
     try {
-      source = await call({
-        model: p.model,
-        input: [
-          ...input,
+      response = await callChat({
+        messages: [
+          ...messages,
           {
             role: "system",
             content:
-              "تحقق الآن من الطلب فقط: إذا كل البيانات موجودة والزبون وافق صراحة استدع create_order. وإلا استدع request_order_details وحدد سؤالاً واحداً عن أهم معلومة ناقصة. ممنوع الرد النصي وممنوع التخمين.",
+              "Order decision only: use create_order if every required field and explicit confirmation are present. Otherwise use request_order_details and ask exactly one natural question in the customer's current language. Do not answer with plain text and do not guess.",
           },
         ],
-        tools,
-        tool_choice: "required",
-        parallel_tool_calls: false,
-        ...(env.AI_PROVIDER === "xai" ? { store: p.storeResponses } : {}),
+        toolChoice: "required",
         temperature: 0.05,
-        max_output_tokens: 300,
+        maxTokens: 260,
       });
-      fc = functionCall(source);
     } catch (error) {
       logger.warn(
-        { err: error, eventId: c.eventId },
+        { err: error, eventId: context.eventId },
         "Order decision pass failed",
       );
       return {
-        text: safeProviderFallback(c.history),
+        text: fallbackReply(context.history),
         orderError: "ORDER_DECISION_AI_FAILED",
       };
     }
   }
 
-  if (!fc) {
-    const answer = text(source) || text(first);
-    if (needsOrderDecision) {
-      if (answer && !claimsOrderWasCreated(answer)) return { text: answer };
-      return {
-        text: "باش نثبت الطلبية فعلاً، زيدلي أو أكدلي المعلومة الناقصة وما نقولك تم حتى يخرج رقم الطلب من النظام.",
-        orderError: "ORDER_DECISION_WITHOUT_TOOL",
-      };
-    }
+  if (!response.toolCall) {
+    const answer = response.text.trim();
     if (!answer)
       return {
-        text: safeProviderFallback(c.history),
+        text: fallbackReply(context.history),
         orderError: "AI_EMPTY_RESPONSE",
       };
     if (claimsOrderWasCreated(answer)) {
       logger.warn(
-        { eventId: c.eventId, storeId: c.storeId, channelId: c.channelId },
-        "Blocked an order confirmation without a successful order tool call",
+        {
+          eventId: context.eventId,
+          storeId: context.storeId,
+          channelId: context.channelId,
+        },
+        "Blocked order confirmation without a successful tool call",
       );
       return {
-        text: "باش نثبت الطلبية فعلاً، أكدلي المعلومات الأخيرة وما نقولك تم حتى يخرج رقم الطلب من النظام.",
+        text: deterministicOrderReply(context.history, {}),
         orderError: "ORDER_CONFIRMATION_WITHOUT_TOOL",
       };
     }
     return { text: answer };
   }
 
-  const result = await orderToolResult(fc, c);
-  if (result.question)
-    return { text: result.question, orderError: "ORDER_DETAILS_MISSING" };
-  if (!fc.call_id)
+  const toolResult = await executeTool(response.toolCall, context);
+  if (toolResult.question)
     return {
-      text: result.order
-        ? `يعطيك الصحة! تسجّلت طلبيتك ${result.order.orderNumber} والمجموع ${result.order.totalAmount} دج.`
-        : `ما قدرتش نثبت الطلب: ${result.error ?? "بيانات ناقصة"}.`,
-      order: result.order,
-      orderError: result.error,
+      text: toolResult.question,
+      orderError: "ORDER_DETAILS_MISSING",
     };
 
-  const output = {
-    type: "function_call_output",
-    call_id: fc.call_id,
-    output: JSON.stringify(result.tool),
+  const toolMessage: ChatMessage = {
+    role: "tool",
+    name: response.toolCall.function.name,
+    tool_call_id: response.toolCall.id,
+    content: JSON.stringify(toolResult.payload),
   };
   let finalText = "";
   try {
-    const second = await call({
-      model: p.model,
-      input: p.storeResponses ? [output] : [...input, ...source.output, output],
-      ...(p.storeResponses ? { previous_response_id: source.id } : {}),
-      tools,
-      tool_choice: "none",
-      ...(env.AI_PROVIDER === "xai" ? { store: p.storeResponses } : {}),
-      temperature: 0.15,
-      max_output_tokens: 250,
+    const final = await callChat({
+      messages: [...messages, response.assistant, toolMessage],
+      toolChoice: "none",
+      temperature: 0.25,
+      maxTokens: 220,
     });
-    finalText = text(second);
+    finalText = final.text;
   } catch (error) {
     logger.warn(
-      { err: error, eventId: c.eventId },
-      "Final order wording failed; using deterministic response",
+      { err: error, eventId: context.eventId },
+      "Final order wording failed; using deterministic wording",
     );
   }
 
-  finalText ||=
-    result.order
-      ? `يعطيك الصحة! تسجّلت طلبيتك ${result.order.orderNumber} والمجموع ${result.order.totalAmount} دج.`
-      : `ما قدرتش نثبت الطلب: ${result.error ?? "صححلي المعلومة الناقصة"}.`;
+  finalText ||= deterministicOrderReply(context.history, toolResult);
+  if (!toolResult.order && claimsOrderWasCreated(finalText))
+    finalText = deterministicOrderReply(context.history, toolResult);
+
   return {
-    text:
-      !result.order && claimsOrderWasCreated(finalText)
-        ? `ما قدرتش نثبت الطلب: ${result.error ?? "صححلي المعلومة الناقصة"}.`
-        : finalText,
-    order: result.order,
-    orderError: result.error,
+    text: finalText,
+    order: toolResult.order,
+    orderError: toolResult.error,
   };
 }
