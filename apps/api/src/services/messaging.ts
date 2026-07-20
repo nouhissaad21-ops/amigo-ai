@@ -8,81 +8,150 @@ type Cred = {
   accessToken?: string;
   phoneNumberId?: string;
   wabaId?: string;
+  instagramAccessToken?: string;
+  facebookPageAccessToken?: string;
   instagramUserId?: string;
   oauthUserId?: string;
+  pageId?: string;
+  graphHost?: "instagram" | "facebook";
 };
 
-async function body(r: Response) {
-  const t = await r.text();
+type ApiBody = {
+  message_id?: string;
+  messages?: Array<{ id?: string }>;
+  error?: { message?: string };
+  raw?: string;
+};
+
+async function body(response: Response): Promise<ApiBody> {
+  const text = await response.text();
   try {
-    return JSON.parse(t);
+    return JSON.parse(text) as ApiBody;
   } catch {
-    return { raw: t.slice(0, 500) };
+    return { raw: text.slice(0, 500) };
   }
 }
 
-async function facebook(c: Channel, to: string, text: string) {
-  const x = decryptJson<Cred>(c.credentialsEncrypted);
-  if (!x.accessToken) throw new AppError(500, "MISSING_TOKEN", "Token ناقص");
-  const u = new URL(
-    `https://graph.facebook.com/${env.META_GRAPH_VERSION}/${c.externalAccountId}/messages`,
+async function facebook(channel: Channel, to: string, text: string) {
+  const credentials = decryptJson<Cred>(channel.credentialsEncrypted);
+  if (!credentials.accessToken)
+    throw new AppError(500, "MISSING_TOKEN", "Token ناقص");
+  const url = new URL(
+    `https://graph.facebook.com/${env.META_GRAPH_VERSION}/${channel.externalAccountId}/messages`,
   );
-  u.searchParams.set("appsecret_proof", metaAppSecretProof(x.accessToken));
-  const r = await fetch(u, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${x.accessToken}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        recipient: { id: to },
-        messaging_type: "RESPONSE",
-        message: { text: text.slice(0, 1900) },
-      }),
+  url.searchParams.set(
+    "appsecret_proof",
+    metaAppSecretProof(credentials.accessToken),
+  );
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${credentials.accessToken}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      recipient: { id: to },
+      messaging_type: "RESPONSE",
+      message: { text: text.slice(0, 1900) },
     }),
-    b = await body(r);
-  if (!r.ok)
+    signal: AbortSignal.timeout(7_000),
+  });
+  const data = await body(response);
+  if (!response.ok)
     throw new AppError(
       502,
       "META_SEND_FAILED",
-      b.error?.message ?? "فشل الإرسال",
+      data.error?.message ?? "فشل الإرسال",
     );
-  return b.message_id ?? crypto.randomUUID();
+  return data.message_id ?? crypto.randomUUID();
 }
 
 function unique(values: Array<string | null | undefined>) {
   return [...new Set(values.map((value) => value?.trim()).filter(Boolean))] as string[];
 }
 
-async function instagram(c: Channel, to: string, text: string) {
-  const x = decryptJson<Cred>(c.credentialsEncrypted);
-  if (!x.accessToken) throw new AppError(500, "MISSING_TOKEN", "Token ناقص");
+async function instagram(channel: Channel, to: string, text: string) {
+  const credentials = decryptJson<Cred>(channel.credentialsEncrypted);
+  const defaultToken = credentials.accessToken;
+  const tokenCandidates: Array<{
+    host: "instagram" | "facebook";
+    token?: string;
+  }> = [
+    {
+      host: credentials.graphHost ?? (credentials.pageId ? "facebook" : "instagram"),
+      token:
+        credentials.graphHost === "facebook"
+          ? credentials.facebookPageAccessToken ?? defaultToken
+          : credentials.instagramAccessToken ?? defaultToken,
+    },
+    {
+      host: "instagram",
+      token: credentials.instagramAccessToken ?? (!credentials.pageId ? defaultToken : undefined),
+    },
+    {
+      host: "facebook",
+      token: credentials.facebookPageAccessToken ?? (credentials.pageId ? defaultToken : undefined),
+    },
+  ];
+  const connections = tokenCandidates.filter(
+    (item, index, all): item is { host: "instagram" | "facebook"; token: string } =>
+      Boolean(item.token) &&
+      all.findIndex(
+        (other) => other.host === item.host && other.token === item.token,
+      ) === index,
+  );
+  if (!connections.length)
+    throw new AppError(500, "MISSING_TOKEN", "Instagram token ناقص");
+
   const accountIds = unique([
-    c.externalAccountId,
-    x.instagramUserId,
-    c.externalBusinessId,
-    x.oauthUserId,
+    credentials.instagramUserId,
+    channel.externalAccountId,
+    credentials.oauthUserId,
+    "me",
   ]);
   const failures: string[] = [];
 
-  for (const accountId of accountIds) {
-    const url = new URL(
-      `https://graph.instagram.com/${env.META_GRAPH_VERSION}/${accountId}/messages`,
-    );
-    const r = await fetch(url, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${x.accessToken}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          recipient: { id: to },
-          message: { text: text.slice(0, 1900) },
-        }),
-      }),
-      b = await body(r);
-    if (r.ok) return b.message_id ?? crypto.randomUUID();
-    failures.push(b.error?.message ?? b.raw ?? `HTTP ${r.status}`);
+  for (const connection of connections) {
+    for (const accountId of accountIds) {
+      const url = new URL(
+        `https://graph.${connection.host}.com/${env.META_GRAPH_VERSION}/${accountId}/messages`,
+      );
+      if (
+        connection.host === "facebook" &&
+        connection.token === credentials.facebookPageAccessToken
+      )
+        url.searchParams.set(
+          "appsecret_proof",
+          metaAppSecretProof(connection.token),
+        );
+      try {
+        const response = await fetch(url, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${connection.token}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            recipient: { id: to },
+            message: { text: text.slice(0, 1900) },
+          }),
+          signal: AbortSignal.timeout(7_000),
+        });
+        const data = await body(response);
+        if (response.ok) return data.message_id ?? crypto.randomUUID();
+        failures.push(
+          `${connection.host}:${accountId}: ${
+            data.error?.message ?? data.raw ?? `HTTP ${response.status}`
+          }`,
+        );
+      } catch (error) {
+        failures.push(
+          `${connection.host}:${accountId}: ${
+            error instanceof Error ? error.message : "send failed"
+          }`,
+        );
+      }
+    }
   }
 
   throw new AppError(
@@ -92,52 +161,62 @@ async function instagram(c: Channel, to: string, text: string) {
   );
 }
 
-async function cloud(c: Channel, to: string, text: string) {
-  const x = decryptJson<Cred>(c.credentialsEncrypted);
-  if (!x.accessToken || !x.phoneNumberId)
+async function cloud(channel: Channel, to: string, text: string) {
+  const credentials = decryptJson<Cred>(channel.credentialsEncrypted);
+  if (!credentials.accessToken || !credentials.phoneNumberId)
     throw new AppError(500, "MISSING_TOKEN", "إعداد WhatsApp ناقص");
-  const r = await fetch(
-      `https://graph.facebook.com/${env.META_GRAPH_VERSION}/${x.phoneNumberId}/messages`,
-      {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${x.accessToken}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          messaging_product: "whatsapp",
-          to,
-          type: "text",
-          text: { body: text.slice(0, 4000) },
-        }),
+  const response = await fetch(
+    `https://graph.facebook.com/${env.META_GRAPH_VERSION}/${credentials.phoneNumberId}/messages`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${credentials.accessToken}`,
+        "content-type": "application/json",
       },
-    ),
-    b = await body(r);
-  if (!r.ok)
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to,
+        type: "text",
+        text: { body: text.slice(0, 4000) },
+      }),
+      signal: AbortSignal.timeout(7_000),
+    },
+  );
+  const data = await body(response);
+  if (!response.ok)
     throw new AppError(
       502,
       "WHATSAPP_SEND_FAILED",
-      b.error?.message ?? "فشل الإرسال",
+      data.error?.message ?? "فشل الإرسال",
     );
-  return b.messages?.[0]?.id ?? crypto.randomUUID();
+  return data.messages?.[0]?.id ?? crypto.randomUUID();
 }
 
 export async function dispatchOutbound(
-  c: Channel,
+  channel: Channel,
   to: string,
   text: string,
   messageId: string,
 ) {
-  if (c.type === "FACEBOOK")
-    return { externalMessageId: await facebook(c, to, text), queued: false };
-  if (c.type === "INSTAGRAM")
-    return { externalMessageId: await instagram(c, to, text), queued: false };
-  if (c.type === "WHATSAPP_CLOUD")
-    return { externalMessageId: await cloud(c, to, text), queued: false };
-  if (c.type === "WHATSAPP_BAILEYS") {
+  if (channel.type === "FACEBOOK")
+    return {
+      externalMessageId: await facebook(channel, to, text),
+      queued: false,
+    };
+  if (channel.type === "INSTAGRAM")
+    return {
+      externalMessageId: await instagram(channel, to, text),
+      queued: false,
+    };
+  if (channel.type === "WHATSAPP_CLOUD")
+    return {
+      externalMessageId: await cloud(channel, to, text),
+      queued: false,
+    };
+  if (channel.type === "WHATSAPP_BAILEYS") {
     await whatsappOutboundQueue.add(
       "send",
-      { messageId, channelId: c.id, jid: to, text },
+      { messageId, channelId: channel.id, jid: to, text },
       { jobId: messageId },
     );
     return { queued: true };
