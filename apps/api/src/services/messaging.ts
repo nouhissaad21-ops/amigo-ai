@@ -103,22 +103,35 @@ async function instagram(channel: Channel, to: string, text: string) {
   if (!connections.length)
     throw new AppError(500, "MISSING_TOKEN", "Instagram token ناقص");
 
-  const accountIds = unique([
-    credentials.instagramUserId,
-    channel.externalAccountId,
-    credentials.oauthUserId,
-    "me",
-  ]);
   const failures: string[] = [];
 
   for (const connection of connections) {
+    // Instagram Login sends through the professional IG user ID. Facebook
+    // Login/Page-linked mode sends through the Page ID, which was previously
+    // missing from the candidate list and caused every outbound attempt to fail.
+    const accountIds =
+      connection.host === "facebook"
+        ? unique([
+            credentials.pageId,
+            channel.externalBusinessId,
+            credentials.instagramUserId,
+            channel.externalAccountId,
+            credentials.oauthUserId,
+          ])
+        : unique([
+            credentials.instagramUserId,
+            channel.externalAccountId,
+            credentials.oauthUserId,
+            "me",
+          ]);
+
     for (const accountId of accountIds) {
       const url = new URL(
         `https://graph.${connection.host}.com/${env.META_GRAPH_VERSION}/${accountId}/messages`,
       );
       if (
         connection.host === "facebook" &&
-        connection.token === credentials.facebookPageAccessToken
+        (connection.token === credentials.facebookPageAccessToken || credentials.pageId)
       )
         url.searchParams.set(
           "appsecret_proof",
@@ -133,12 +146,16 @@ async function instagram(channel: Channel, to: string, text: string) {
           },
           body: JSON.stringify({
             recipient: { id: to },
+            ...(connection.host === "facebook"
+              ? { messaging_type: "RESPONSE" }
+              : {}),
             message: { text: text.slice(0, 1900) },
           }),
           signal: AbortSignal.timeout(7_000),
         });
         const data = await body(response);
-        if (response.ok) return data.message_id ?? crypto.randomUUID();
+        if (response.ok)
+          return data.message_id ?? data.messages?.[0]?.id ?? crypto.randomUUID();
         failures.push(
           `${connection.host}:${accountId}: ${
             data.error?.message ?? data.raw ?? `HTTP ${response.status}`
@@ -157,7 +174,7 @@ async function instagram(channel: Channel, to: string, text: string) {
   throw new AppError(
     502,
     "INSTAGRAM_SEND_FAILED",
-    failures[0] ?? "فشل إرسال رسالة Instagram",
+    failures.slice(0, 4).join(" | ") || "فشل إرسال رسالة Instagram",
   );
 }
 
