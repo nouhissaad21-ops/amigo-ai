@@ -73,6 +73,9 @@ export function createApp() {
   });
   const raw = express.raw({ type: "application/json", limit: "2mb" });
   app.use("/api/webhooks/meta", raw, metaWebhookRouter);
+  // Accept a dedicated Instagram callback too, so a merchant cannot break the
+  // integration by selecting the Instagram-specific URL in Meta's dashboard.
+  app.use("/api/webhooks/instagram", raw, metaWebhookRouter);
   app.use("/api/webhooks/whatsapp", raw, whatsappWebhookRouter);
   app.use(express.json({ limit: "1mb" }));
   app.use(express.urlencoded({ extended: false, limit: "100kb" }));
