@@ -65,6 +65,8 @@ const metaErrorMessage: Record<string, string> = {
   UNKNOWN: "حدث خطأ غير متوقع أثناء الربط.",
 };
 
+const unknownConnectionError = "حدث خطأ غير متوقع أثناء الربط.";
+
 export default function Channels() {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [cloudForm, setCloudForm] = useState(false);
@@ -106,14 +108,14 @@ export default function Channels() {
       window.history.replaceState({}, "", "/dashboard/channels/");
     } else if (params.get("meta") === "error") {
       const reason = params.get("reason") ?? "UNKNOWN";
-      setError(metaErrorMessage[reason] ?? metaErrorMessage.UNKNOWN);
+      setError(metaErrorMessage[reason] ?? unknownConnectionError);
       window.history.replaceState({}, "", "/dashboard/channels/");
     } else if (params.get("instagram") === "connected") {
       setNotice("تم ربط Instagram مباشرة. شغّل فحص الجاهزية الآن.");
       window.history.replaceState({}, "", "/dashboard/channels/");
     } else if (params.get("instagram") === "error") {
       const reason = params.get("reason") ?? "UNKNOWN";
-      setError(metaErrorMessage[reason] ?? metaErrorMessage.UNKNOWN);
+      setError(metaErrorMessage[reason] ?? unknownConnectionError);
       window.history.replaceState({}, "", "/dashboard/channels/");
     }
   }, [load]);
@@ -311,9 +313,15 @@ export default function Channels() {
               لا تحتاج نسخ توكنات ولا إعدادات تقنية لكل متجر.
             </p>
             <div className="mt-5 flex flex-wrap gap-3 text-[11px] font-bold text-white/70">
-              <span className="flex items-center gap-1.5"><Check size={14} className="text-mint-300" /> رسائل نصية</span>
-              <span className="flex items-center gap-1.5"><Mic2 size={14} className="text-mint-300" /> فهم الرسائل الصوتية</span>
-              <span className="flex items-center gap-1.5"><ShieldCheck size={14} className="text-mint-300" /> OAuth رسمي وآمن</span>
+              <span className="flex items-center gap-1.5">
+                <Check size={14} className="text-mint-300" /> رسائل نصية
+              </span>
+              <span className="flex items-center gap-1.5">
+                <Mic2 size={14} className="text-mint-300" /> فهم الرسائل الصوتية
+              </span>
+              <span className="flex items-center gap-1.5">
+                <ShieldCheck size={14} className="text-mint-300" /> OAuth رسمي وآمن
+              </span>
             </div>
           </div>
           <button
@@ -341,21 +349,33 @@ export default function Channels() {
       <section className="grid gap-5 lg:grid-cols-3">
         <article className="card bg-gradient-to-b from-blue-50 to-white p-6">
           <div className="flex items-center justify-between">
-            <span className="grid size-12 place-items-center rounded-2xl bg-[#1877f2] text-white"><Facebook size={24} /></span>
-            <span className="badge bg-blue-50 text-blue-700">{grouped.facebook.length} حساب</span>
+            <span className="grid size-12 place-items-center rounded-2xl bg-[#1877f2] text-white">
+              <Facebook size={24} />
+            </span>
+            <span className="badge bg-blue-50 text-blue-700">
+              {grouped.facebook.length} حساب
+            </span>
           </div>
           <h2 className="mt-5 font-black text-slate-950">Facebook Messenger</h2>
-          <p className="mb-5 mt-2 text-xs leading-6 text-slate-500">الرسائل والردود والطلبات من صفحة المتجر.</p>
+          <p className="mb-5 mt-2 text-xs leading-6 text-slate-500">
+            الرسائل والردود والطلبات من صفحة المتجر.
+          </p>
           <ChannelList accounts={grouped.facebook} />
         </article>
 
         <article className="card bg-gradient-to-b from-pink-50 to-white p-6">
           <div className="flex items-center justify-between">
-            <span className="grid size-12 place-items-center rounded-2xl bg-gradient-to-br from-violet-600 via-pink-500 to-amber-400 text-white"><Instagram size={24} /></span>
-            <span className="badge bg-pink-50 text-pink-700">{grouped.instagram.length} حساب</span>
+            <span className="grid size-12 place-items-center rounded-2xl bg-gradient-to-br from-violet-600 via-pink-500 to-amber-400 text-white">
+              <Instagram size={24} />
+            </span>
+            <span className="badge bg-pink-50 text-pink-700">
+              {grouped.instagram.length} حساب
+            </span>
           </div>
           <h2 className="mt-5 font-black text-slate-950">Instagram Business</h2>
-          <p className="mb-5 mt-2 text-xs leading-6 text-slate-500">يفهم النص والصوت والدارجة ويرد من الحساب الاحترافي.</p>
+          <p className="mb-5 mt-2 text-xs leading-6 text-slate-500">
+            يفهم النص والصوت والدارجة ويرد من الحساب الاحترافي.
+          </p>
           <ChannelList accounts={grouped.instagram} />
           {metaCapabilities?.directInstagramEnabled && (
             <button
@@ -364,20 +384,34 @@ export default function Channels() {
               onClick={() => void connectInstagram()}
               type="button"
             >
-              {connecting === "instagram" ? "جاري الفتح…" : "الربط المباشر كخيار احتياطي"}
+              {connecting === "instagram"
+                ? "جاري الفتح…"
+                : "الربط المباشر كخيار احتياطي"}
             </button>
           )}
         </article>
 
         <article className="card bg-gradient-to-b from-emerald-50 to-white p-6">
           <div className="flex items-center justify-between">
-            <span className="grid size-12 place-items-center rounded-2xl bg-[#25d366] text-white"><MessageCircle size={24} /></span>
-            <span className="badge bg-emerald-50 text-emerald-700">{grouped.whatsapp.length} حساب</span>
+            <span className="grid size-12 place-items-center rounded-2xl bg-[#25d366] text-white">
+              <MessageCircle size={24} />
+            </span>
+            <span className="badge bg-emerald-50 text-emerald-700">
+              {grouped.whatsapp.length} حساب
+            </span>
           </div>
           <h2 className="mt-5 font-black text-slate-950">WhatsApp Business</h2>
-          <p className="mb-5 mt-2 text-xs leading-6 text-slate-500">Cloud API الرسمي للعمل المستمر على الاستضافة.</p>
+          <p className="mb-5 mt-2 text-xs leading-6 text-slate-500">
+            Cloud API الرسمي للعمل المستمر على الاستضافة.
+          </p>
           <ChannelList accounts={grouped.whatsapp} />
-          <button className="btn-secondary mt-4 w-full" onClick={() => setCloudForm(true)} type="button"><Plus size={18} /> ربط WhatsApp</button>
+          <button
+            className="btn-secondary mt-4 w-full"
+            onClick={() => setCloudForm(true)}
+            type="button"
+          >
+            <Plus size={18} /> ربط WhatsApp
+          </button>
         </article>
       </section>
 
@@ -390,8 +424,10 @@ export default function Channels() {
       </button>
       {showAdvanced && (
         <aside className="mt-4 rounded-2xl border border-slate-100 bg-white p-4 text-xs leading-6 text-slate-600">
-          <b className="text-slate-900">حالة الربط:</b>{" "}
-          Meta {metaCapabilities?.configured ? "جاهز" : "غير مضبوط"} · Business Login {metaCapabilities?.businessLoginConfigured ? "جاهز" : "يحتاج Config ID"} · Instagram مباشر {metaCapabilities?.directInstagramEnabled ? "جاهز" : "غير مفعّل"}.
+          <b className="text-slate-900">حالة الربط:</b> Meta{" "}
+          {metaCapabilities?.configured ? "جاهز" : "غير مضبوط"} · Business Login{" "}
+          {metaCapabilities?.businessLoginConfigured ? "جاهز" : "يحتاج Config ID"} · Instagram مباشر{" "}
+          {metaCapabilities?.directInstagramEnabled ? "جاهز" : "غير مفعّل"}.
         </aside>
       )}
 
@@ -399,10 +435,21 @@ export default function Channels() {
         <section className="card mt-5 overflow-hidden">
           <div className="flex items-center justify-between border-b border-slate-100 px-6 py-5">
             <div>
-              <h2 className="font-black text-slate-950">ربط WhatsApp Cloud API</h2>
-              <p className="mt-1 text-xs text-slate-400">أدخل البيانات من لوحة Meta for Developers</p>
+              <h2 className="font-black text-slate-950">
+                ربط WhatsApp Cloud API
+              </h2>
+              <p className="mt-1 text-xs text-slate-400">
+                أدخل البيانات من لوحة Meta for Developers
+              </p>
             </div>
-            <button aria-label="إغلاق" className="grid size-9 place-items-center rounded-xl bg-slate-100 text-slate-500" onClick={() => setCloudForm(false)} type="button"><X size={18} /></button>
+            <button
+              aria-label="إغلاق"
+              className="grid size-9 place-items-center rounded-xl bg-slate-100 text-slate-500"
+              onClick={() => setCloudForm(false)}
+              type="button"
+            >
+              <X size={18} />
+            </button>
           </div>
           <form className="grid gap-4 p-6 sm:grid-cols-2" onSubmit={saveCloud}>
             {[
@@ -413,15 +460,34 @@ export default function Channels() {
             ].map(([name, label, placeholder]) => (
               <label key={name}>
                 <span className="label">{label}</span>
-                <input autoComplete="off" className="field" name={name} placeholder={placeholder} required type={name === "accessToken" ? "password" : "text"} />
+                <input
+                  autoComplete="off"
+                  className="field"
+                  name={name}
+                  placeholder={placeholder}
+                  required
+                  type={name === "accessToken" ? "password" : "text"}
+                />
               </label>
             ))}
             <div className="flex flex-wrap gap-2 sm:col-span-2">
               <button className="btn-primary" disabled={connecting === "cloud"}>
-                {connecting === "cloud" ? <Loader2 className="animate-spin" size={18} /> : <ShieldCheck size={18} />} حفظ وربط القناة
+                {connecting === "cloud" ? (
+                  <Loader2 className="animate-spin" size={18} />
+                ) : (
+                  <ShieldCheck size={18} />
+                )}{" "}
+                حفظ وربط القناة
               </button>
               {baileysEnabled && (
-                <button className="btn-secondary" disabled={connecting === "qr"} onClick={() => void connectQr()} type="button"><QrCode size={18} /> الربط عبر QR</button>
+                <button
+                  className="btn-secondary"
+                  disabled={connecting === "qr"}
+                  onClick={() => void connectQr()}
+                  type="button"
+                >
+                  <QrCode size={18} /> الربط عبر QR
+                </button>
               )}
             </div>
           </form>
@@ -429,12 +495,20 @@ export default function Channels() {
       )}
 
       {loading && (
-        <div className="mt-5 flex items-center justify-center gap-2 py-8 text-sm text-slate-400"><Loader2 className="animate-spin" size={18} /> جاري تحميل القنوات…</div>
+        <div className="mt-5 flex items-center justify-center gap-2 py-8 text-sm text-slate-400">
+          <Loader2 className="animate-spin" size={18} /> جاري تحميل القنوات…
+        </div>
       )}
 
       <aside className="mt-5 flex items-start gap-3 rounded-2xl border border-amber-100 bg-amber-50 p-4 text-xs leading-6 text-amber-900">
         <ShieldCheck className="mt-0.5 shrink-0" size={19} />
-        <p><b>للعمل مع زبائن حقيقيين، يجب أن يكون تطبيق Meta في وضع Live وتكون صلاحيات الرسائل معتمدة.</b> بعد الربط شغّل «فحص الجاهزية» لكل حساب.</p>
+        <p>
+          <b>
+            للعمل مع زبائن حقيقيين، يجب أن يكون تطبيق Meta في وضع Live وتكون
+            صلاحيات الرسائل معتمدة.
+          </b>{" "}
+          بعد الربط شغّل «فحص الجاهزية» لكل حساب.
+        </p>
       </aside>
     </>
   );
