@@ -4,7 +4,9 @@ import { AppError } from "../errors.js";
 import { logger } from "../logger.js";
 import { buildMerchantSystemPrompt } from "../prompt.js";
 import { dispatchOutbound } from "./messaging.js";
+import { transcribeMetaVoice } from "./media-intelligence.js";
 import { runMerchantAgent } from "./xai.js";
+
 export type NormalizedInbound = {
   externalMessageId: string;
   customerExternalId: string;
@@ -12,7 +14,9 @@ export type NormalizedInbound = {
   text: string;
   timestamp: string;
   rawType?: string;
+  mediaUrl?: string;
 };
+
 async function deliver(c: Channel, to: string, text: string, id: string) {
   const claim = await systemDb.message.updateMany({
     where: { id, status: "QUEUED" },
@@ -48,6 +52,7 @@ async function deliver(c: Channel, to: string, text: string, id: string) {
     throw e;
   }
 }
+
 export async function processInboundEvent(eventId: string) {
   const claim = await systemDb.webhookEvent.updateMany({
     where: { id: eventId, status: { in: ["RECEIVED", "FAILED"] } },
@@ -68,29 +73,38 @@ export async function processInboundEvent(eventId: string) {
       });
       return;
     }
+
     const channel = await systemDb.channel.findFirstOrThrow({
-        where: { id: e.channelId, storeId: e.storeId },
-      }),
-      conv = await systemDb.conversation.upsert({
-        where: {
-          storeId_channelId_customerExternalId: {
-            storeId: e.storeId,
-            channelId: e.channelId,
-            customerExternalId: p.customerExternalId,
-          },
-        },
-        update: {
-          lastMessageAt: new Date(p.timestamp),
-          customerName: p.customerName,
-        },
-        create: {
+      where: { id: e.channelId, storeId: e.storeId },
+    });
+    let inboundText = p.text.trim();
+    if (p.rawType === "audio" && p.mediaUrl) {
+      const transcript = await transcribeMetaVoice(channel, p.mediaUrl);
+      inboundText = transcript?.trim()
+        ? transcript.trim()
+        : "الزبون أرسل رسالة صوتية، لكن الصوت لم يتحول إلى نص. اطلب منه باختصار إعادة الصوت أو كتابة طلبه.";
+    }
+
+    const conv = await systemDb.conversation.upsert({
+      where: {
+        storeId_channelId_customerExternalId: {
           storeId: e.storeId,
           channelId: e.channelId,
           customerExternalId: p.customerExternalId,
-          customerName: p.customerName,
-          lastMessageAt: new Date(p.timestamp),
         },
-      });
+      },
+      update: {
+        lastMessageAt: new Date(p.timestamp),
+        customerName: p.customerName,
+      },
+      create: {
+        storeId: e.storeId,
+        channelId: e.channelId,
+        customerExternalId: p.customerExternalId,
+        customerName: p.customerName,
+        lastMessageAt: new Date(p.timestamp),
+      },
+    });
     if (conv.status === "HANDOFF" || conv.status === "BLOCKED") {
       await systemDb.webhookEvent.update({
         where: { id: eventId },
@@ -98,6 +112,11 @@ export async function processInboundEvent(eventId: string) {
       });
       return;
     }
+
+    const enrichedPayload = {
+      ...p,
+      ...(p.rawType === "audio" ? { transcribedText: inboundText } : {}),
+    } as Prisma.InputJsonValue;
     try {
       await systemDb.message.create({
         data: {
@@ -108,8 +127,8 @@ export async function processInboundEvent(eventId: string) {
           sourceEventId: e.id,
           direction: "INBOUND",
           role: "USER",
-          content: p.text.trim(),
-          payload: e.payload as Prisma.InputJsonValue,
+          content: inboundText,
+          payload: enrichedPayload,
           status: "RECEIVED",
         },
       });
@@ -122,6 +141,7 @@ export async function processInboundEvent(eventId: string) {
       )
         throw err;
     }
+
     const [store, rules, products, rates, hist, recent] = await Promise.all([
       systemDb.store.findUniqueOrThrow({
         where: { id: e.storeId },
@@ -174,6 +194,7 @@ export async function processInboundEvent(eventId: string) {
       });
       return;
     }
+
     const prompt = buildMerchantSystemPrompt({
       storeName: store.name,
       currency: store.currency,
@@ -214,37 +235,37 @@ export async function processInboundEvent(eventId: string) {
         : undefined,
     });
     const result = await runMerchantAgent({
-        storeId: e.storeId,
-        channelId: e.channelId,
-        conversationId: conv.id,
-        eventId: e.id,
-        systemPrompt: prompt,
-        history: hist.reverse().map((m) => ({
-          role: m.role === "USER" ? ("user" as const) : ("assistant" as const),
-          content: m.content,
-        })),
-      }),
-      out = await systemDb.message.upsert({
-        where: {
-          storeId_sourceEventId_direction: {
-            storeId: e.storeId,
-            sourceEventId: e.id,
-            direction: "OUTBOUND",
-          },
-        },
-        update: {},
-        create: {
+      storeId: e.storeId,
+      channelId: e.channelId,
+      conversationId: conv.id,
+      eventId: e.id,
+      systemPrompt: prompt,
+      history: hist.reverse().map((m) => ({
+        role: m.role === "USER" ? ("user" as const) : ("assistant" as const),
+        content: m.content,
+      })),
+    });
+    const out = await systemDb.message.upsert({
+      where: {
+        storeId_sourceEventId_direction: {
           storeId: e.storeId,
-          conversationId: conv.id,
-          channelId: e.channelId,
           sourceEventId: e.id,
           direction: "OUTBOUND",
-          role: "ASSISTANT",
-          content: result.text,
-          payload: result.order ? { orderId: result.order.id } : {},
-          status: "QUEUED",
         },
-      });
+      },
+      update: {},
+      create: {
+        storeId: e.storeId,
+        conversationId: conv.id,
+        channelId: e.channelId,
+        sourceEventId: e.id,
+        direction: "OUTBOUND",
+        role: "ASSISTANT",
+        content: result.text,
+        payload: result.order ? { orderId: result.order.id } : {},
+        status: "QUEUED",
+      },
+    });
     await deliver(channel, p.customerExternalId, out.content, out.id);
     await systemDb.$transaction([
       systemDb.message.updateMany({
@@ -278,33 +299,34 @@ export async function processInboundEvent(eventId: string) {
     throw err;
   }
 }
+
 export async function sendFallbackForEvent(id: string) {
   const e = await systemDb.webhookEvent.findUnique({ where: { id } });
   if (!e?.storeId || !e.channelId) return;
-  const p = e.payload as unknown as NormalizedInbound,
-    conv = await systemDb.conversation.findUnique({
-      where: {
-        storeId_channelId_customerExternalId: {
-          storeId: e.storeId,
-          channelId: e.channelId,
-          customerExternalId: p.customerExternalId,
-        },
+  const p = e.payload as unknown as NormalizedInbound;
+  const conv = await systemDb.conversation.findUnique({
+    where: {
+      storeId_channelId_customerExternalId: {
+        storeId: e.storeId,
+        channelId: e.channelId,
+        customerExternalId: p.customerExternalId,
       },
-    });
+    },
+  });
   if (!conv) return;
   const [channel, rules] = await Promise.all([
-      systemDb.channel.findUniqueOrThrow({ where: { id: e.channelId } }),
-      systemDb.merchantRules.findUnique({ where: { storeId: e.storeId } }),
-    ]),
-    old = await systemDb.message.findUnique({
-      where: {
-        storeId_sourceEventId_direction: {
-          storeId: e.storeId,
-          sourceEventId: e.id,
-          direction: "OUTBOUND",
-        },
+    systemDb.channel.findUniqueOrThrow({ where: { id: e.channelId } }),
+    systemDb.merchantRules.findUnique({ where: { storeId: e.storeId } }),
+  ]);
+  const old = await systemDb.message.findUnique({
+    where: {
+      storeId_sourceEventId_direction: {
+        storeId: e.storeId,
+        sourceEventId: e.id,
+        direction: "OUTBOUND",
       },
-    });
+    },
+  });
   if (
     old?.status === "SENT" ||
     (old?.payload &&
@@ -313,22 +335,22 @@ export async function sendFallbackForEvent(id: string) {
       (old.payload as Record<string, unknown>).transport === "baileys-queue")
   )
     return;
-  const text = rules?.fallbackMessage ?? "سمحلي، صرا مشكل تقني صغير.",
-    out =
-      old ??
-      (await systemDb.message.create({
-        data: {
-          storeId: e.storeId,
-          channelId: e.channelId,
-          conversationId: conv.id,
-          sourceEventId: e.id,
-          direction: "OUTBOUND",
-          role: "ASSISTANT",
-          content: text,
-          status: "QUEUED",
-          payload: { fallback: true },
-        },
-      }));
+  const text = rules?.fallbackMessage ?? "سمحلي، صرا مشكل تقني صغير.";
+  const out =
+    old ??
+    (await systemDb.message.create({
+      data: {
+        storeId: e.storeId,
+        channelId: e.channelId,
+        conversationId: conv.id,
+        sourceEventId: e.id,
+        direction: "OUTBOUND",
+        role: "ASSISTANT",
+        content: text,
+        status: "QUEUED",
+        payload: { fallback: true },
+      },
+    }));
   if (out.status === "PROCESSING")
     await systemDb.message.update({
       where: { id: out.id },
