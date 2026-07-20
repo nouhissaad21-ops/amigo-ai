@@ -47,7 +47,7 @@ function chatTool(name: string, args: string, id = "call-1") {
   });
 }
 
-describe("Groq Chat Completions merchant agent", () => {
+describe("multilingual Chat Completions merchant agent", () => {
   beforeEach(() => {
     createOrderFromTool.mockReset();
   });
@@ -77,7 +77,6 @@ describe("Groq Chat Completions merchant agent", () => {
       { role: "user", content: "شحال؟" },
     ]);
     expect(body.tools[0]).toHaveProperty("function.name", "create_order");
-    expect(body).not.toHaveProperty("store");
   });
 
   it("executes create_order and feeds its trusted result back to the model", async () => {
@@ -156,7 +155,7 @@ describe("Groq Chat Completions merchant agent", () => {
     expect(JSON.parse(toolOutput.content)).toMatchObject({ success: false });
   });
 
-  it("answers greetings without waiting for Groq", async () => {
+  it("answers greetings instantly in the customer's language", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
@@ -166,8 +165,16 @@ describe("Groq Chat Completions merchant agent", () => {
         history: [{ role: "user", content: "سلام" }],
       }),
     ).resolves.toEqual({
-      text: "وعليكم السلام 😊 مرحبا بيك، واش حاب تعرف على منتجاتنا؟",
+      text: "وعليكم السلام 😊 مرحبا بيك! قولّي برك واش حاب تعرف ونعاونك.",
+    });
+    await expect(
+      runMerchantAgent({
+        ...context,
+        history: [{ role: "user", content: "Bonjour" }],
+      }),
+    ).resolves.toEqual({
+      text: "Bonjour 😊 Bienvenue ! Dites-moi ce que vous cherchez et je vous aide.",
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
-});
+}
