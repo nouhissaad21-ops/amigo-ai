@@ -24,31 +24,37 @@ function verify(req: Request, res: Response) {
 metaWebhookRouter.get("/", verify);
 whatsappWebhookRouter.get("/", verify);
 
-async function persist(x: {
-  provider: string;
+async function persist(input: {
   eventKey: string;
   storeId: string;
   channelId: string;
   payload: NormalizedInbound;
 }) {
+  const provider = "META_MESSAGE";
   try {
-    const e = await systemDb.webhookEvent.create({ data: x });
-    await enqueueInbound(e.id);
-  } catch (err) {
+    const event = await systemDb.webhookEvent.create({
+      data: { ...input, provider },
+    });
+    await enqueueInbound(event.id);
+  } catch (error) {
     if (
-      err instanceof Prisma.PrismaClientKnownRequestError &&
-      err.code === "P2002"
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === "P2002"
     ) {
-      const e = await systemDb.webhookEvent.findUnique({
+      const event = await systemDb.webhookEvent.findUnique({
         where: {
-          provider_eventKey: { provider: x.provider, eventKey: x.eventKey },
+          provider_eventKey: { provider, eventKey: input.eventKey },
         },
       });
-      if (e && e.status !== "COMPLETED" && e.status !== "IGNORED")
-        await enqueueInbound(e.id, true);
+      if (
+        event &&
+        event.status !== "COMPLETED" &&
+        event.status !== "IGNORED"
+      )
+        await enqueueInbound(event.id, true);
       return;
     }
-    throw err;
+    throw error;
   }
 }
 
@@ -67,10 +73,13 @@ function uniqueIds(values: unknown[]) {
 }
 
 function messagingEvents(entry: any) {
-  const events = Array.isArray(entry?.messaging) ? [...entry.messaging] : [];
+  const events: any[] = [];
+  if (Array.isArray(entry?.messaging)) events.push(...entry.messaging);
+  if (Array.isArray(entry?.standby)) events.push(...entry.standby);
   for (const change of entry?.changes ?? []) {
     const value = change?.value;
     if (Array.isArray(value?.messaging)) events.push(...value.messaging);
+    else if (Array.isArray(value?.messages)) events.push(...value.messages);
     else if (value?.message || value?.postback) events.push(value);
   }
   return events;
@@ -79,15 +88,18 @@ function messagingEvents(entry: any) {
 function accountIds(entry: any, event: any) {
   return uniqueIds([
     entry?.id,
+    entry?.page_id,
     event?.recipient?.id,
     event?.message?.recipient?.id,
     event?.postback?.recipient?.id,
+    event?.metadata?.recipient_id,
   ]);
 }
 
-type InstagramStoredCredentials = {
+type StoredCredentials = {
   instagramUserId?: string;
   oauthUserId?: string;
+  pageId?: string;
 };
 
 function channelAliases(channel: Channel) {
@@ -95,26 +107,28 @@ function channelAliases(channel: Channel) {
     channel.externalAccountId,
     channel.externalBusinessId,
   ];
-  if (channel.type === "INSTAGRAM") {
-    try {
-      const credentials = decryptJson<InstagramStoredCredentials>(
-        channel.credentialsEncrypted,
-      );
-      aliases.push(credentials.instagramUserId, credentials.oauthUserId);
-    } catch (error) {
-      logger.warn(
-        { channelId: channel.id, err: error },
-        "Could not read Instagram channel aliases",
-      );
-    }
+  try {
+    const credentials = decryptJson<StoredCredentials>(
+      channel.credentialsEncrypted,
+    );
+    aliases.push(
+      credentials.instagramUserId,
+      credentials.oauthUserId,
+      credentials.pageId,
+    );
+  } catch (error) {
+    logger.warn(
+      { channelId: channel.id, err: error },
+      "Could not read channel aliases",
+    );
   }
   return uniqueIds(aliases);
 }
 
-async function connectedChannel(
+async function connectedChannelByType(
   type: "FACEBOOK" | "INSTAGRAM",
   ids: string[],
-): Promise<Channel | null> {
+) {
   if (ids.length) {
     const exact = await systemDb.channel.findFirst({
       where: {
@@ -129,39 +143,49 @@ async function connectedChannel(
     if (exact) return exact;
   }
 
-  if (type !== "INSTAGRAM") return null;
   const candidates = await systemDb.channel.findMany({
-    where: { type: "INSTAGRAM", status: "CONNECTED" },
+    where: { type, status: "CONNECTED" },
   });
   const aliasMatch = candidates.find((channel) =>
     channelAliases(channel).some((alias) => ids.includes(alias)),
   );
   if (aliasMatch) return aliasMatch;
 
-  // Some Instagram Login webhook deployments have returned an account alias
-  // different from both OAuth IDs. Falling back is safe only when the whole
-  // installation has exactly one connected Instagram channel.
-  const onlyChannel = candidates.length === 1 ? candidates[0] : undefined;
-  if (onlyChannel) {
+  // Instagram Login has occasionally delivered an alias not exposed by OAuth.
+  // This fallback is safe only when this installation has one Instagram channel.
+  if (type === "INSTAGRAM" && candidates.length === 1) {
     logger.warn(
-      { channelId: onlyChannel.id, candidateAccountIds: ids },
-      "Using the only connected Instagram channel for unmatched webhook IDs",
+      { channelId: candidates[0]?.id, candidateAccountIds: ids },
+      "Using the only Instagram channel for unmatched Meta webhook IDs",
     );
-    return onlyChannel;
+    return candidates[0] ?? null;
   }
   return null;
 }
 
+async function resolveMetaChannel(object: unknown, ids: string[]) {
+  const preferred: "FACEBOOK" | "INSTAGRAM" =
+    object === "instagram" ? "INSTAGRAM" : "FACEBOOK";
+  const first = await connectedChannelByType(preferred, ids);
+  if (first) return first;
+
+  // Instagram messages linked through a Facebook Page can arrive with
+  // object="page". Trying the other channel type prevents dropping them.
+  const alternative = preferred === "FACEBOOK" ? "INSTAGRAM" : "FACEBOOK";
+  return connectedChannelByType(alternative, ids);
+}
+
 function metaText(event: any) {
-  const message = event?.message;
+  const message = event?.message ?? event;
   const postback = event?.postback;
   return String(
     message?.text ??
+      message?.message ??
       message?.quick_reply?.payload ??
       postback?.title ??
       postback?.payload ??
       (message?.attachments?.length
-        ? "[الزبون بعث مرفق أو صورة]"
+        ? "[The customer sent an attachment or image]"
         : ""),
   ).trim();
 }
@@ -169,16 +193,18 @@ function metaText(event: any) {
 function eventMessageId(event: any, accountId: string, text: string) {
   const supplied =
     event?.message?.mid ??
+    event?.message?.id ??
     event?.postback?.mid ??
     event?.mid ??
-    event?.message_id;
+    event?.message_id ??
+    event?.id;
   if (supplied) return String(supplied);
   return `synthetic-${crypto
     .createHash("sha256")
     .update(
       JSON.stringify({
         accountId,
-        sender: event?.sender?.id,
+        sender: event?.sender?.id ?? event?.from?.id,
         timestamp: event?.timestamp,
         text,
       }),
@@ -186,10 +212,23 @@ function eventMessageId(event: any, accountId: string, text: string) {
     .digest("hex")}`;
 }
 
+function customerParticipant(event: any, businessAliases: string[]) {
+  const candidates = uniqueIds([
+    event?.sender?.id,
+    event?.from?.id,
+    event?.message?.from?.id,
+    event?.recipient?.id,
+    event?.to?.id,
+    ...(event?.to?.data ?? []).map((item: any) => item?.id),
+  ]);
+  return candidates.find((id) => !businessAliases.includes(id)) ?? "";
+}
+
 metaWebhookRouter.post("/", async (req, res) => {
   const raw = req.body as Buffer;
   if (!Buffer.isBuffer(raw))
     throw new AppError(400, "INVALID_WEBHOOK_BODY", "Webhook body غير صالح");
+
   const secrets = [env.META_APP_SECRET, env.INSTAGRAM_APP_SECRET].filter(
     (secret): secret is string => Boolean(secret),
   );
@@ -208,7 +247,7 @@ metaWebhookRouter.post("/", async (req, res) => {
   } catch {
     throw new AppError(400, "INVALID_WEBHOOK_JSON", "Webhook JSON غير صالح");
   }
-  const type = body.object === "instagram" ? "INSTAGRAM" : "FACEBOOK";
+
   const jobs: Promise<void>[] = [];
   let received = 0;
   let routed = 0;
@@ -217,30 +256,24 @@ metaWebhookRouter.post("/", async (req, res) => {
     for (const event of messagingEvents(entry)) {
       received++;
       const ids = accountIds(entry, event);
-      const channel = await connectedChannel(type, ids);
+      const channel = await resolveMetaChannel(body.object, ids);
       if (!channel) {
         logger.warn(
           {
             webhookObject: body.object,
-            channelType: type,
             candidateAccountIds: ids,
-            senderId: event?.sender?.id,
+            senderId: event?.sender?.id ?? event?.from?.id,
           },
           "Meta webhook could not be matched to a connected channel",
         );
         continue;
       }
 
-      const senderId = String(event?.sender?.id ?? "").trim();
-      const message = event?.message;
+      const message = event?.message ?? event;
+      if (message?.is_echo || event?.is_echo) continue;
       const businessAliases = channelAliases(channel);
-      const senderIsBusiness = businessAliases.includes(senderId);
-      if (
-        !senderId ||
-        message?.is_echo ||
-        (message?.is_self && senderIsBusiness)
-      )
-        continue;
+      const customerId = customerParticipant(event, businessAliases);
+      if (!customerId) continue;
 
       const text = metaText(event);
       if (!text) continue;
@@ -252,13 +285,12 @@ metaWebhookRouter.post("/", async (req, res) => {
       routed++;
       jobs.push(
         persist({
-          provider: `META_${type}`,
           eventKey: `${channel.id}:${externalMessageId}`,
           storeId: channel.storeId,
           channelId: channel.id,
           payload: {
             externalMessageId,
-            customerExternalId: senderId,
+            customerExternalId: customerId,
             text,
             timestamp: new Date(
               Number(event?.timestamp ?? entry?.time ?? Date.now()),
@@ -276,23 +308,23 @@ metaWebhookRouter.post("/", async (req, res) => {
 
   await Promise.all(jobs);
   logger.info(
-    { webhookObject: body.object, channelType: type, received, routed },
+    { webhookObject: body.object, received, routed },
     "Meta webhook processed",
   );
   res.status(200).send("EVENT_RECEIVED");
 });
 
-const waText = (m: any) =>
+const waText = (message: any) =>
   String(
-    m.type === "text"
-      ? m.text?.body
-      : m.type === "button"
-        ? (m.button?.text ?? m.button?.payload)
-        : m.type === "interactive"
-          ? (m.interactive?.button_reply?.title ??
-            m.interactive?.list_reply?.title)
-          : m.type === "image"
-            ? (m.image?.caption ?? "[الزبون بعث صورة]")
+    message.type === "text"
+      ? message.text?.body
+      : message.type === "button"
+        ? (message.button?.text ?? message.button?.payload)
+        : message.type === "interactive"
+          ? (message.interactive?.button_reply?.title ??
+            message.interactive?.list_reply?.title)
+          : message.type === "image"
+            ? (message.image?.caption ?? "[The customer sent an image]")
             : "",
   );
 
@@ -308,14 +340,15 @@ whatsappWebhookRouter.post("/", async (req, res) => {
     )
   )
     throw new AppError(401, "INVALID_WHATSAPP_SIGNATURE", "توقيع غير صالح");
-  const b = JSON.parse(raw.toString()) as any,
-    jobs: Promise<void>[] = [];
-  for (const e of b.entry ?? [])
-    for (const ch of e.changes ?? []) {
-      const v = ch.value,
-        id = String(v.metadata?.phone_number_id ?? "");
+
+  const body = JSON.parse(raw.toString()) as any;
+  const jobs: Promise<void>[] = [];
+  for (const entry of body.entry ?? [])
+    for (const change of entry.changes ?? []) {
+      const value = change.value;
+      const id = String(value.metadata?.phone_number_id ?? "");
       if (!id) continue;
-      const c = await systemDb.channel.findUnique({
+      const channel = await systemDb.channel.findUnique({
         where: {
           type_externalAccountId: {
             type: "WHATSAPP_CLOUD",
@@ -323,26 +356,27 @@ whatsappWebhookRouter.post("/", async (req, res) => {
           },
         },
       });
-      if (!c || c.status !== "CONNECTED") continue;
-      for (const m of v.messages ?? []) {
-        const t = waText(m);
-        if (!m.id || !t) continue;
-        const contact = (v.contacts ?? []).find((q: any) => q.wa_id === m.from);
+      if (!channel || channel.status !== "CONNECTED") continue;
+      for (const message of value.messages ?? []) {
+        const text = waText(message);
+        if (!message.id || !text) continue;
+        const contact = (value.contacts ?? []).find(
+          (item: any) => item.wa_id === message.from,
+        );
         jobs.push(
           persist({
-            provider: "WHATSAPP_CLOUD",
-            eventKey: `${c.id}:${String(m.id)}`,
-            storeId: c.storeId,
-            channelId: c.id,
+            eventKey: `${channel.id}:${String(message.id)}`,
+            storeId: channel.storeId,
+            channelId: channel.id,
             payload: {
-              externalMessageId: String(m.id),
-              customerExternalId: String(m.from),
+              externalMessageId: String(message.id),
+              customerExternalId: String(message.from),
               customerName: contact?.profile?.name,
-              text: t,
+              text,
               timestamp: new Date(
-                Number(m.timestamp ?? Date.now() / 1000) * 1000,
+                Number(message.timestamp ?? Date.now() / 1000) * 1000,
               ).toISOString(),
-              rawType: String(m.type ?? "text"),
+              rawType: String(message.type ?? "text"),
             },
           }),
         );
