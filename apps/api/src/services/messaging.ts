@@ -8,6 +8,8 @@ type Cred = {
   accessToken?: string;
   phoneNumberId?: string;
   wabaId?: string;
+  instagramAccessToken?: string;
+  facebookPageAccessToken?: string;
   instagramUserId?: string;
   oauthUserId?: string;
   pageId?: string;
@@ -70,38 +72,63 @@ function unique(values: Array<string | null | undefined>) {
 
 async function instagram(channel: Channel, to: string, text: string) {
   const credentials = decryptJson<Cred>(channel.credentialsEncrypted);
-  if (!credentials.accessToken)
+  const defaultToken = credentials.accessToken;
+  const tokenCandidates: Array<{
+    host: "instagram" | "facebook";
+    token?: string;
+  }> = [
+    {
+      host: credentials.graphHost ?? (credentials.pageId ? "facebook" : "instagram"),
+      token:
+        credentials.graphHost === "facebook"
+          ? credentials.facebookPageAccessToken ?? defaultToken
+          : credentials.instagramAccessToken ?? defaultToken,
+    },
+    {
+      host: "instagram",
+      token: credentials.instagramAccessToken ?? (!credentials.pageId ? defaultToken : undefined),
+    },
+    {
+      host: "facebook",
+      token: credentials.facebookPageAccessToken ?? (credentials.pageId ? defaultToken : undefined),
+    },
+  ];
+  const connections = tokenCandidates.filter(
+    (item, index, all): item is { host: "instagram" | "facebook"; token: string } =>
+      Boolean(item.token) &&
+      all.findIndex(
+        (other) => other.host === item.host && other.token === item.token,
+      ) === index,
+  );
+  if (!connections.length)
     throw new AppError(500, "MISSING_TOKEN", "Instagram token ناقص");
 
   const accountIds = unique([
     credentials.instagramUserId,
     channel.externalAccountId,
     credentials.oauthUserId,
-    channel.externalBusinessId,
     "me",
   ]);
-  const preferred =
-    credentials.graphHost ?? (credentials.pageId ? "facebook" : "instagram");
-  const hosts = unique([preferred, "instagram", "facebook"]) as Array<
-    "instagram" | "facebook"
-  >;
   const failures: string[] = [];
 
-  for (const host of hosts) {
+  for (const connection of connections) {
     for (const accountId of accountIds) {
       const url = new URL(
-        `https://graph.${host}.com/${env.META_GRAPH_VERSION}/${accountId}/messages`,
+        `https://graph.${connection.host}.com/${env.META_GRAPH_VERSION}/${accountId}/messages`,
       );
-      if (host === "facebook" && credentials.pageId)
+      if (
+        connection.host === "facebook" &&
+        connection.token === credentials.facebookPageAccessToken
+      )
         url.searchParams.set(
           "appsecret_proof",
-          metaAppSecretProof(credentials.accessToken),
+          metaAppSecretProof(connection.token),
         );
       try {
         const response = await fetch(url, {
           method: "POST",
           headers: {
-            authorization: `Bearer ${credentials.accessToken}`,
+            authorization: `Bearer ${connection.token}`,
             "content-type": "application/json",
           },
           body: JSON.stringify({
@@ -113,13 +140,13 @@ async function instagram(channel: Channel, to: string, text: string) {
         const data = await body(response);
         if (response.ok) return data.message_id ?? crypto.randomUUID();
         failures.push(
-          `${host}:${accountId}: ${
+          `${connection.host}:${accountId}: ${
             data.error?.message ?? data.raw ?? `HTTP ${response.status}`
           }`,
         );
       } catch (error) {
         failures.push(
-          `${host}:${accountId}: ${
+          `${connection.host}:${accountId}: ${
             error instanceof Error ? error.message : "send failed"
           }`,
         );
