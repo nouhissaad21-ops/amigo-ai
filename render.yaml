@@ -42,11 +42,13 @@ services:
           name: amigo-ai-cache
           property: connectionString
       - key: DATABASE_URL
-        sync: false
+        fromDatabase:
+          name: amigo-ai-db
+          property: connectionString
       - key: AMIGO_TENANT_PASSWORD
         generateValue: true
       - key: CREDENTIAL_ENCRYPTION_KEY
-        sync: false
+        generateValue: true
       - key: JWT_SECRET
         generateValue: true
       - key: OAUTH_STATE_SECRET
@@ -77,3 +79,11 @@ services:
         value: v25.0
       - key: META_ENABLE_INSTAGRAM
         value: true
+
+databases:
+  - name: amigo-ai-db
+    plan: free
+    region: frankfurt
+    databaseName: amigo_ai
+    user: amigo_admin
+    postgresMajorVersion: "17"
