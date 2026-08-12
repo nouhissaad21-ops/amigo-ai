@@ -18,16 +18,15 @@ export async function initialPlatformRole(
   email?: string,
 ): Promise<PlatformRole> {
   await lockBootstrap(tx);
-
   const targetEmail = configuredAdminEmail();
+
+  // Never promote the first public signup to platform admin. Production
+  // deployments must explicitly configure the administrator email in the
+  // private environment (PLATFORM_ADMIN_EMAIL).
   if (targetEmail && email?.trim().toLowerCase() === targetEmail)
     return "SUPER_ADMIN";
 
-  const existing = await tx.user.findFirst({
-    where: { platformRole: "SUPER_ADMIN" },
-    select: { id: true },
-  });
-  return existing ? "USER" : "SUPER_ADMIN";
+  return "USER";
 }
 
 export async function ensureInitialPlatformAdmin(
@@ -52,17 +51,6 @@ export async function ensureInitialPlatformAdmin(
       return promoted.platformRole;
     }
 
-    const existing = await tx.user.findFirst({
-      where: { platformRole: "SUPER_ADMIN" },
-      select: { id: true },
-    });
-    if (existing) return user.platformRole;
-
-    const promoted = await tx.user.update({
-      where: { id: userId },
-      data: { platformRole: "SUPER_ADMIN" },
-      select: { platformRole: true },
-    });
-    return promoted.platformRole;
+    return user.platformRole;
   });
 }
