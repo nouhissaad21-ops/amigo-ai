@@ -8,7 +8,10 @@ import { logger } from "../logger.js";
 import { enqueueInbound } from "../queues.js";
 import { decryptJson, verifyHmacSignature } from "../security.js";
 import type { NormalizedInbound } from "../services/inbound.js";
-import { audioAttachmentUrl } from "../services/media-intelligence.js";
+import {
+  audioAttachmentUrl,
+  imageAttachmentUrl,
+} from "../services/media-intelligence.js";
 
 export const metaWebhookRouter = Router(),
   whatsappWebhookRouter = Router();
@@ -107,6 +110,7 @@ type MetaContent = {
   text: string;
   rawType: string;
   mediaUrl?: string;
+  imageUrl?: string;
 };
 
 function channelAliases(channel: Channel) {
@@ -189,8 +193,7 @@ function metaContent(event: any): MetaContent {
       postback?.payload ??
       "",
   ).trim();
-  if (directText)
-    return { text: directText, rawType: event?.postback ? "postback" : "text" };
+  if (directText) return { text: directText, rawType: event?.postback ? "postback" : "text" };
 
   const mediaUrl = audioAttachmentUrl(event);
   if (mediaUrl)
@@ -198,6 +201,14 @@ function metaContent(event: any): MetaContent {
       text: "[Customer sent a voice message]",
       rawType: "audio",
       mediaUrl,
+    };
+
+  const imageUrl = imageAttachmentUrl(event);
+  if (imageUrl)
+    return {
+      text: "[Customer sent an image]",
+      rawType: "image",
+      imageUrl,
     };
 
   if (message?.attachments?.length)
@@ -316,6 +327,7 @@ metaWebhookRouter.post("/", async (req, res) => {
             ).toISOString(),
             rawType: content.rawType,
             mediaUrl: content.mediaUrl,
+            imageUrl: content.imageUrl,
           },
         }),
       );
