@@ -54,7 +54,7 @@ services:
       - key: OAUTH_STATE_SECRET
         generateValue: true
       - key: PLATFORM_ADMIN_EMAIL
-        sync: false
+        value: nouhiss012345@gmail.com
       - key: AI_PROVIDER
         value: groq
       - key: AI_TIMEOUT_MS
