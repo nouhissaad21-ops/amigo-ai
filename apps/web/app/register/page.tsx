@@ -13,7 +13,7 @@ import {
   Store,
 } from "lucide-react";
 import { Logo } from "@/components/ui";
-import { api } from "@/lib/api";
+import { ApiError, api } from "@/lib/api";
 
 type AuthResponse = {
   user: {
@@ -24,27 +24,60 @@ type AuthResponse = {
   };
 };
 
-type FriendlyError = Error & { code?: string };
-
 function friendlyRegistrationError(error: unknown) {
-  const reason = error as FriendlyError;
-  switch (reason.code) {
+  const reason = error instanceof ApiError ? error : null;
+  switch (reason?.code) {
     case "EMAIL_ALREADY_REGISTERED":
-      return "هذا البريد مسجل من قبل. ادخل لحسابك بدل إنشاء حساب جديد.";
+      return {
+        message: "هذا البريد مسجل من قبل. يمكنك الدخول مباشرة إلى حسابك.",
+        login: true,
+      };
     case "RATE_LIMITED":
-      return "طلبات كثيرة خلال وقت قصير. انتظر قليلاً ثم أعد المحاولة.";
+      return {
+        message: "طلبات كثيرة خلال وقت قصير. انتظر قليلاً ثم أعد المحاولة.",
+        login: false,
+      };
+    case "RATE_LIMIT_UNAVAILABLE":
+      return {
+        message: "خدمة الحماية المؤقتة غير متاحة حالياً. أعد المحاولة بعد لحظات.",
+        login: false,
+      };
     case "REGISTRATION_UNAVAILABLE":
+      return {
+        message: "قاعدة البيانات غير جاهزة حالياً. أعد المحاولة بعد لحظات.",
+        login: false,
+      };
+    case "REGISTRATION_BUSY":
+      return {
+        message: "الخادم مشغول حالياً. أعد المحاولة بعد لحظات.",
+        login: false,
+      };
     case "SESSION_INITIALIZATION_FAILED":
-      return "الخدمة مشغولة مؤقتاً. بياناتك لم تُرسل مرتين؛ أعد المحاولة بعد لحظات.";
-    case "REGISTRATION_FAILED":
-      return "تعذر إنشاء الحساب حالياً. حاول مرة أخرى، وإذا استمر المشكل تواصل مع الدعم.";
+      return {
+        message: "تم إنشاء الحساب بنجاح، لكن تعذر فتح الجلسة تلقائياً. ادخل من صفحة تسجيل الدخول.",
+        login: true,
+      };
+    case "REQUEST_TIMEOUT":
+      return {
+        message: "الخادم تأخر في الرد. لا تعاود الضغط عدة مرات؛ انتظر لحظات ثم جرّب مرة واحدة.",
+        login: false,
+      };
+    case "NETWORK_ERROR":
+      return {
+        message: "تعذر الاتصال بالخادم. تحقق من الإنترنت ثم أعد المحاولة.",
+        login: false,
+      };
     default:
-      return reason?.message || "فشل التسجيل. تحقق من البيانات وحاول مرة أخرى.";
+      return {
+        message:
+          reason?.message || "تعذر إنشاء الحساب حالياً. حاول مرة أخرى.",
+        login: false,
+      };
   }
 }
 
 export default function Register() {
-  const [error, setError] = useState("");
+  const [error, setError] = useState<{ message: string; login: boolean }>();
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [password, setPassword] = useState("");
@@ -61,7 +94,7 @@ export default function Register() {
     event.preventDefault();
     if (loading) return;
 
-    setError("");
+    setError(undefined);
     setLoading(true);
     const form = new FormData(event.currentTarget);
 
@@ -143,10 +176,12 @@ export default function Register() {
 
             {error && (
               <div className="rounded-2xl border border-red-100 bg-red-50 p-4 text-sm font-bold text-red-700 sm:col-span-2" role="alert">
-                <p>{error}</p>
-                <Link className="mt-2 inline-block text-red-900 underline" href="/login/">
-                  فتح صفحة تسجيل الدخول
-                </Link>
+                <p>{error.message}</p>
+                {error.login && (
+                  <Link className="mt-2 inline-block text-red-900 underline" href="/login/">
+                    فتح صفحة تسجيل الدخول
+                  </Link>
+                )}
               </div>
             )}
 
