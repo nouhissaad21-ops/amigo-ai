@@ -53,6 +53,8 @@ services:
         generateValue: true
       - key: OAUTH_STATE_SECRET
         generateValue: true
+      - key: PLATFORM_ADMIN_EMAIL
+        sync: false
       - key: AI_PROVIDER
         value: groq
       - key: AI_TIMEOUT_MS
