@@ -4,7 +4,10 @@ import { AppError } from "../errors.js";
 import { logger } from "../logger.js";
 import { buildMerchantSystemPrompt } from "../prompt.js";
 import { dispatchOutbound } from "./messaging.js";
-import { transcribeMetaVoice } from "./media-intelligence.js";
+import {
+  imageAttachmentDataUrl,
+  transcribeMetaVoice,
+} from "./media-intelligence.js";
 import { runMerchantAgent } from "./xai.js";
 
 export type NormalizedInbound = {
@@ -15,6 +18,7 @@ export type NormalizedInbound = {
   timestamp: string;
   rawType?: string;
   mediaUrl?: string;
+  imageUrl?: string;
 };
 
 async function deliver(c: Channel, to: string, text: string, id: string) {
@@ -234,6 +238,12 @@ export async function processInboundEvent(eventId: string) {
           }
         : undefined,
     });
+
+    const imageDataUrl =
+      p.rawType === "image" && p.imageUrl
+        ? await imageAttachmentDataUrl(channel, p.imageUrl)
+        : undefined;
+
     const result = await runMerchantAgent({
       storeId: e.storeId,
       channelId: e.channelId,
@@ -244,6 +254,7 @@ export async function processInboundEvent(eventId: string) {
         role: m.role === "USER" ? ("user" as const) : ("assistant" as const),
         content: m.content,
       })),
+      imageDataUrl,
     });
     const out = await systemDb.message.upsert({
       where: {
