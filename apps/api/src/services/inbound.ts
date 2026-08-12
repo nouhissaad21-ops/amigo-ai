@@ -9,6 +9,7 @@ import {
   transcribeMetaVoice,
 } from "./media-intelligence.js";
 import { runMerchantAgent } from "./xai.js";
+import { understandProductImage } from "./vision.js";
 
 export type NormalizedInbound = {
   externalMessageId: string;
@@ -87,6 +88,14 @@ export async function processInboundEvent(eventId: string) {
       inboundText = transcript?.trim()
         ? transcript.trim()
         : "الزبون أرسل رسالة صوتية، لكن الصوت لم يتحول إلى نص. اطلب منه باختصار إعادة الصوت أو كتابة طلبه.";
+    }
+    if (p.rawType === "image" && p.imageUrl) {
+      const imageDataUrl = await imageAttachmentDataUrl(channel, p.imageUrl);
+      const imageUnderstanding = imageDataUrl
+        ? await understandProductImage(imageDataUrl)
+        : undefined;
+      if (imageUnderstanding)
+        inboundText = `${inboundText}\n[تحليل صورة الزبون — استخدمه كمعلومة مساعدة ولا تخترع شيئاً]: ${imageUnderstanding}`;
     }
 
     const conv = await systemDb.conversation.upsert({
@@ -239,11 +248,6 @@ export async function processInboundEvent(eventId: string) {
         : undefined,
     });
 
-    const imageDataUrl =
-      p.rawType === "image" && p.imageUrl
-        ? await imageAttachmentDataUrl(channel, p.imageUrl)
-        : undefined;
-
     const result = await runMerchantAgent({
       storeId: e.storeId,
       channelId: e.channelId,
@@ -254,7 +258,6 @@ export async function processInboundEvent(eventId: string) {
         role: m.role === "USER" ? ("user" as const) : ("assistant" as const),
         content: m.content,
       })),
-      imageDataUrl,
     });
     const out = await systemDb.message.upsert({
       where: {
