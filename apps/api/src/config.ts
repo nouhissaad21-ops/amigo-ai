@@ -68,6 +68,7 @@ const schema = z
     SERVE_STATIC_WEB: bool,
     STATIC_WEB_DIR: z.string().default("apps/web/out"),
     ENABLE_BAILEYS: bool.default(true),
+    PLATFORM_ADMIN_EMAIL: z.email().toLowerCase().optional(),
     AI_PROVIDER: z.enum(["groq", "xai"]).default("groq"),
     AI_TIMEOUT_MS: z.coerce.number().int().min(5000).max(180000).default(45000),
     GROQ_API_KEY: z.string().min(1).optional(),
