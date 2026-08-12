@@ -3,11 +3,7 @@ import { env } from "../config.js";
 import { systemDb } from "../db.js";
 import { AppError } from "../errors.js";
 import { logger } from "../logger.js";
-import {
-  decryptJson,
-  encryptJson,
-  metaAppSecretProof,
-} from "../security.js";
+import { decryptJson, encryptJson, metaAppSecretProof } from "../security.js";
 
 type InstagramErrorBody = {
   error?: { message?: string; code?: number; type?: string };
@@ -24,7 +20,13 @@ type InstagramTokenResponse = InstagramErrorBody & {
 
 type InstagramProfile = InstagramErrorBody & {
   id?: string;
+  user_id?: string | number;
   username?: string;
+};
+
+type SubscriptionResponse = InstagramErrorBody & {
+  success?: boolean;
+  data?: Array<{ id?: string; subscribed_fields?: string[] }>;
 };
 
 export type InstagramStoredCredentials = {
@@ -37,36 +39,24 @@ export type InstagramStoredCredentials = {
   graphHost?: "instagram" | "facebook";
 };
 
-type SubscriptionResponse = InstagramErrorBody & {
-  success?: boolean;
-  data?: Array<{ id?: string; subscribed_fields?: string[] }>;
-};
-
 const requiredWebhookFields = ["messages", "messaging_postbacks"] as const;
-const pageWebhookFields = [
-  "messages",
-  "messaging_postbacks",
-  "message_echoes",
-] as const;
+const pageWebhookFields = ["messages", "messaging_postbacks", "message_echoes"] as const;
 
-function instagramCredentials() {
+function credentials() {
   if (!env.INSTAGRAM_APP_ID || !env.INSTAGRAM_APP_SECRET)
     throw new AppError(
       503,
       "INSTAGRAM_NOT_CONFIGURED",
-      "Instagram App ID وInstagram App Secret غير مضبوطين",
+      "Instagram Business Login غير مضبوط في إعدادات المنصة",
     );
-  return {
-    appId: env.INSTAGRAM_APP_ID,
-    appSecret: env.INSTAGRAM_APP_SECRET,
-  };
+  return { appId: env.INSTAGRAM_APP_ID, appSecret: env.INSTAGRAM_APP_SECRET };
 }
 
 function redirectUri() {
   return `${env.API_PUBLIC_URL.replace(/\/$/, "")}/api/integrations/instagram/callback`;
 }
 
-async function responseJson<T>(response: Response): Promise<T & InstagramErrorBody> {
+async function json<T>(response: Response): Promise<T & InstagramErrorBody> {
   const text = await response.text();
   try {
     return JSON.parse(text) as T & InstagramErrorBody;
@@ -75,87 +65,68 @@ async function responseJson<T>(response: Response): Promise<T & InstagramErrorBo
   }
 }
 
-function instagramErrorMessage(data: InstagramErrorBody) {
+function errorMessage(data: InstagramErrorBody) {
   return data.error?.message ?? data.error_message ?? "Instagram رفضت الطلب";
 }
 
-async function exchangeLongLivedToken(
-  shortToken: string,
-  appSecret: string,
-): Promise<string> {
-  const params = {
+async function exchangeLongLivedToken(shortToken: string, appSecret: string) {
+  const params = new URLSearchParams({
     grant_type: "ig_exchange_token",
     client_secret: appSecret,
     access_token: shortToken,
-  };
-  const endpoints = [
-    `https://graph.instagram.com/${env.META_GRAPH_VERSION}/access_token`,
-    "https://graph.instagram.com/access_token",
-  ];
+  });
   const failures: string[] = [];
 
-  for (const endpoint of endpoints) {
-    const postResponse = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${shortToken}`,
-        "content-type": "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams(params),
-      signal: AbortSignal.timeout(10_000),
-    });
-    const postData = await responseJson<InstagramTokenResponse>(postResponse);
-    if (postResponse.ok && postData.access_token) return postData.access_token;
-    failures.push(`POST ${instagramErrorMessage(postData)}`);
-
-    const getUrl = new URL(endpoint);
-    for (const [key, value] of Object.entries(params))
-      getUrl.searchParams.set(key, value);
-    const getResponse = await fetch(getUrl, {
-      headers: { authorization: `Bearer ${shortToken}` },
-      signal: AbortSignal.timeout(10_000),
-    });
-    const getData = await responseJson<InstagramTokenResponse>(getResponse);
-    if (getResponse.ok && getData.access_token) return getData.access_token;
-    failures.push(`GET ${instagramErrorMessage(getData)}`);
+  // Meta deployments have historically accepted GET for this endpoint; some
+  // newer configurations report that POST is required. Try both safely.
+  for (const method of ["GET", "POST"] as const) {
+    const url = new URL(
+      `https://graph.instagram.com/${env.META_GRAPH_VERSION}/access_token`,
+    );
+    let response: Response;
+    if (method === "GET") {
+      for (const [key, value] of params) url.searchParams.set(key, value);
+      response = await fetch(url, {
+        headers: { authorization: `Bearer ${shortToken}` },
+        signal: AbortSignal.timeout(12_000),
+      });
+    } else {
+      response = await fetch(url, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${shortToken}`,
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: params,
+        signal: AbortSignal.timeout(12_000),
+      });
+    }
+    const data = await json<InstagramTokenResponse>(response);
+    if (response.ok && data.access_token) return data;
+    failures.push(`${method}: ${errorMessage(data)}`);
   }
 
   throw new AppError(
     400,
     "INSTAGRAM_LONG_TOKEN_FAILED",
-    failures.find((message) => !message.includes("method type")) ??
-      failures[0] ??
-      "تعذر إنشاء رمز Instagram طويل المدة",
+    failures.join(" | ").slice(0, 900),
   );
 }
 
-async function instagramGraph<T>(
-  path: string,
-  token: string,
-  init?: RequestInit,
-): Promise<T> {
-  const url = new URL(
-    `https://graph.instagram.com/${env.META_GRAPH_VERSION}/${path}`,
-  );
+async function instagramGraph<T>(path: string, token: string, init?: RequestInit) {
+  const url = new URL(`https://graph.instagram.com/${env.META_GRAPH_VERSION}/${path}`);
   const response = await fetch(url, {
     ...init,
-    headers: {
-      authorization: `Bearer ${token}`,
-      ...(init?.headers ?? {}),
-    },
+    headers: { authorization: `Bearer ${token}`, ...(init?.headers ?? {}) },
     signal: init?.signal ?? AbortSignal.timeout(10_000),
   });
-  const data = await responseJson<T>(response);
+  const data = await json<T>(response);
   if (!response.ok || data.error)
-    throw new AppError(
-      502,
-      "INSTAGRAM_API_ERROR",
-      instagramErrorMessage(data),
-    );
+    throw new AppError(502, "INSTAGRAM_API_ERROR", errorMessage(data));
   return data;
 }
 
-function instagramSubscriptionUrl(id: string, token: string) {
+function subscriptionUrl(id: string, token: string) {
   const url = new URL(
     `https://graph.instagram.com/${env.META_GRAPH_VERSION}/${id}/subscribed_apps`,
   );
@@ -163,46 +134,19 @@ function instagramSubscriptionUrl(id: string, token: string) {
   return url;
 }
 
-async function readInstagramSubscription(id: string, token: string) {
-  const response = await fetch(instagramSubscriptionUrl(id, token), {
-    headers: { authorization: `Bearer ${token}` },
-    signal: AbortSignal.timeout(8_000),
-  });
-  const data = await responseJson<SubscriptionResponse>(response);
-  if (!response.ok || data.error)
-    throw new AppError(
-      502,
-      "INSTAGRAM_SUBSCRIPTION_CHECK_FAILED",
-      instagramErrorMessage(data),
-    );
-  return new Set(
-    (data.data ?? []).flatMap((item) => item.subscribed_fields ?? []),
-  );
-}
-
-async function writeInstagramSubscription(id: string, token: string) {
-  const url = instagramSubscriptionUrl(id, token);
+async function ensureInstagramSubscription(id: string, token: string) {
+  const url = subscriptionUrl(id, token);
   url.searchParams.set("subscribed_fields", requiredWebhookFields.join(","));
   const response = await fetch(url, {
     method: "POST",
     headers: { authorization: `Bearer ${token}` },
-    signal: AbortSignal.timeout(8_000),
+    signal: AbortSignal.timeout(10_000),
   });
-  const data = await responseJson<SubscriptionResponse>(response);
+  const data = await json<SubscriptionResponse>(response);
   if (!response.ok || data.error || data.success === false)
-    throw new AppError(
-      502,
-      "INSTAGRAM_SUBSCRIBE_ERROR",
-      instagramErrorMessage(data) || "فشل تفعيل Webhook الخاص بـInstagram",
-    );
-}
+    throw new AppError(502, "INSTAGRAM_SUBSCRIBE_ERROR", errorMessage(data));
 
-export async function ensureInstagramSubscription(id: string, token: string) {
-  await writeInstagramSubscription(id, token);
-  const fields = await readInstagramSubscription(id, token).catch(() => new Set<string>());
-  // Instagram Login can auto-subscribe messaging fields while returning an empty
-  // subscribed_apps list in some API versions. A successful POST is authoritative.
-  return fields.size ? [...fields] : [...requiredWebhookFields];
+  return [...requiredWebhookFields];
 }
 
 async function ensureFacebookPageSubscription(pageId: string, token: string) {
@@ -214,15 +158,11 @@ async function ensureFacebookPageSubscription(pageId: string, token: string) {
   const response = await fetch(url, {
     method: "POST",
     headers: { authorization: `Bearer ${token}` },
-    signal: AbortSignal.timeout(8_000),
+    signal: AbortSignal.timeout(10_000),
   });
-  const data = await responseJson<SubscriptionResponse>(response);
+  const data = await json<SubscriptionResponse>(response);
   if (!response.ok || data.error || data.success === false)
-    throw new AppError(
-      502,
-      "INSTAGRAM_PAGE_SUBSCRIBE_ERROR",
-      instagramErrorMessage(data) || "فشل اشتراك صفحة Instagram المرتبطة",
-    );
+    throw new AppError(502, "INSTAGRAM_PAGE_SUBSCRIBE_ERROR", errorMessage(data));
   return [...pageWebhookFields];
 }
 
@@ -232,7 +172,7 @@ async function saveInstagram(input: {
   externalBusinessId: string;
   username?: string;
   accessToken: string;
-}): Promise<Channel> {
+}) {
   const old = await systemDb.channel.findFirst({
     where: {
       type: "INSTAGRAM",
@@ -253,21 +193,20 @@ async function saveInstagram(input: {
       previous = {};
     }
   }
-  const credentials: InstagramStoredCredentials = {
-    ...previous,
-    accessToken: input.accessToken,
-    instagramAccessToken: input.accessToken,
-    instagramUserId: input.externalAccountId,
-    oauthUserId: input.externalBusinessId,
-    graphHost: "instagram",
-  };
   const data = {
     storeId: input.storeId,
     type: "INSTAGRAM" as const,
     externalAccountId: input.externalAccountId,
     externalBusinessId: input.externalBusinessId,
     name: input.username ? `@${input.username}` : "Instagram Business",
-    credentialsEncrypted: encryptJson(credentials),
+    credentialsEncrypted: encryptJson({
+      ...previous,
+      accessToken: input.accessToken,
+      instagramAccessToken: input.accessToken,
+      instagramUserId: input.externalAccountId,
+      oauthUserId: input.externalBusinessId,
+      graphHost: "instagram" as const,
+    }),
     status: "CONNECTED" as const,
     lastConnectedAt: new Date(),
     lastError: null,
@@ -277,29 +216,26 @@ async function saveInstagram(input: {
     : systemDb.channel.create({ data });
 }
 
-function unique(values: Array<string | null | undefined>) {
+function ids(values: Array<string | null | undefined>) {
   return [...new Set(values.map((value) => value?.trim()).filter(Boolean))] as string[];
 }
 
 export async function repairInstagramChannel(channel: Channel) {
   if (channel.type !== "INSTAGRAM")
     throw new AppError(422, "NOT_INSTAGRAM_CHANNEL", "القناة ليست Instagram");
-  const credentials = decryptJson<InstagramStoredCredentials>(
-    channel.credentialsEncrypted,
-  );
-
+  const stored = decryptJson<InstagramStoredCredentials>(channel.credentialsEncrypted);
   const instagramToken =
-    credentials.instagramAccessToken ??
-    (credentials.graphHost !== "facebook" ? credentials.accessToken : undefined);
+    stored.instagramAccessToken ??
+    (stored.graphHost !== "facebook" ? stored.accessToken : undefined);
   const pageToken =
-    credentials.facebookPageAccessToken ??
-    (credentials.pageId ? credentials.accessToken : undefined);
-  const instagramIds = unique([
-    credentials.instagramUserId,
+    stored.facebookPageAccessToken ??
+    (stored.pageId ? stored.accessToken : undefined);
+  const instagramIds = ids([
+    stored.instagramUserId,
     channel.externalAccountId,
-    credentials.oauthUserId,
+    stored.oauthUserId,
   ]);
-  const pageIds = unique([credentials.pageId, channel.externalBusinessId]);
+  const pageIds = ids([stored.pageId, channel.externalBusinessId]);
   const failures: string[] = [];
 
   if (instagramToken) {
@@ -308,17 +244,11 @@ export async function repairInstagramChannel(channel: Channel) {
         const fields = await ensureInstagramSubscription(id, instagramToken);
         await systemDb.channel.update({
           where: { id: channel.id },
-          data: {
-            webhookSubscribedAt: new Date(),
-            status: "CONNECTED",
-            lastError: null,
-          },
+          data: { webhookSubscribedAt: new Date(), status: "CONNECTED", lastError: null },
         });
         return { mode: "instagram" as const, id, fields };
       } catch (error) {
-        failures.push(
-          `Instagram Login (${id}): ${error instanceof Error ? error.message : "subscribe failed"}`,
-        );
+        failures.push(`Instagram Login (${id}): ${error instanceof Error ? error.message : "subscribe failed"}`);
       }
     }
   }
@@ -329,24 +259,16 @@ export async function repairInstagramChannel(channel: Channel) {
         const fields = await ensureFacebookPageSubscription(pageId, pageToken);
         await systemDb.channel.update({
           where: { id: channel.id },
-          data: {
-            webhookSubscribedAt: new Date(),
-            status: "CONNECTED",
-            lastError: null,
-          },
+          data: { webhookSubscribedAt: new Date(), status: "CONNECTED", lastError: null },
         });
         return { mode: "facebook-page" as const, id: pageId, fields };
       } catch (error) {
-        failures.push(
-          `Facebook Page (${pageId}): ${error instanceof Error ? error.message : "subscribe failed"}`,
-        );
+        failures.push(`Facebook Page (${pageId}): ${error instanceof Error ? error.message : "subscribe failed"}`);
       }
     }
   }
 
   const message = failures[0] ?? "Instagram token أو Page token ناقص";
-  // Do not disable routing because a transient subscription inspection failed.
-  // A valid webhook may still arrive and the inbox poller may still recover DMs.
   await systemDb.channel.update({
     where: { id: channel.id },
     data: { status: "CONNECTED", lastError: message.slice(0, 1000) },
@@ -364,19 +286,16 @@ export async function repairConnectedInstagramChannels() {
       await repairInstagramChannel(channel);
       repaired++;
     } catch (error) {
-      logger.warn(
-        { channelId: channel.id, err: error },
-        "Instagram channel auto-repair failed",
-      );
+      logger.warn({ channelId: channel.id, err: error }, "Instagram channel auto-repair failed");
     }
   }
   return { checked: channels.length, repaired };
 }
 
 export function instagramOAuthUrl(state: string) {
-  const credentials = instagramCredentials();
+  const { appId } = credentials();
   const url = new URL("https://www.instagram.com/oauth/authorize");
-  url.searchParams.set("client_id", credentials.appId);
+  url.searchParams.set("client_id", appId);
   url.searchParams.set("redirect_uri", redirectUri());
   url.searchParams.set("response_type", "code");
   url.searchParams.set(
@@ -384,53 +303,35 @@ export function instagramOAuthUrl(state: string) {
     "instagram_business_basic,instagram_business_manage_messages",
   );
   url.searchParams.set("state", state);
-  url.searchParams.set("enable_fb_login", "0");
   url.searchParams.set("force_authentication", "1");
   return url.toString();
 }
 
 export async function completeInstagramOAuth(storeId: string, code: string) {
-  const credentials = instagramCredentials();
-  const shortBody = new URLSearchParams({
-    client_id: credentials.appId,
-    client_secret: credentials.appSecret,
-    grant_type: "authorization_code",
-    redirect_uri: redirectUri(),
-    code,
+  const { appId, appSecret } = credentials();
+  const shortResponse = await fetch("https://api.instagram.com/oauth/access_token", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: appId,
+      client_secret: appSecret,
+      grant_type: "authorization_code",
+      redirect_uri: redirectUri(),
+      code,
+    }),
+    signal: AbortSignal.timeout(12_000),
   });
-  const shortResponse = await fetch(
-    "https://api.instagram.com/oauth/access_token",
-    {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: shortBody,
-      signal: AbortSignal.timeout(12_000),
-    },
-  );
-  const shortData = await responseJson<InstagramTokenResponse>(shortResponse);
+  const shortData = await json<InstagramTokenResponse>(shortResponse);
   if (!shortResponse.ok || !shortData.access_token || !shortData.user_id)
-    throw new AppError(
-      400,
-      "INSTAGRAM_CODE_EXCHANGE_FAILED",
-      instagramErrorMessage(shortData),
-    );
+    throw new AppError(400, "INSTAGRAM_CODE_EXCHANGE_FAILED", errorMessage(shortData));
 
-  const accessToken = await exchangeLongLivedToken(
-    shortData.access_token,
-    credentials.appSecret,
-  );
-  const profile = await instagramGraph<InstagramProfile>(
-    "me?fields=id,username",
-    accessToken,
-  );
-  const oauthUserId = String(shortData.user_id);
-  const accountId = profile.id ?? oauthUserId;
+  const longData = await exchangeLongLivedToken(shortData.access_token, appSecret);
+  const accessToken = longData.access_token!;
+  const profile = await instagramGraph<InstagramProfile>("me?fields=id,user_id,username", accessToken);
+  const oauthUserId = String(profile.user_id ?? shortData.user_id);
+  const accountId = String(profile.id ?? profile.user_id ?? oauthUserId);
   if (!accountId)
-    throw new AppError(
-      422,
-      "INSTAGRAM_ACCOUNT_NOT_FOUND",
-      "لم نجد حساب Instagram الاحترافي",
-    );
+    throw new AppError(422, "INSTAGRAM_ACCOUNT_NOT_FOUND", "لم نجد حساب Instagram الاحترافي");
 
   const channel = await saveInstagram({
     storeId,
@@ -439,7 +340,6 @@ export async function completeInstagramOAuth(storeId: string, code: string) {
     username: profile.username,
     accessToken,
   });
-
   await repairInstagramChannel(channel);
   return { instagram: 1 };
 }
