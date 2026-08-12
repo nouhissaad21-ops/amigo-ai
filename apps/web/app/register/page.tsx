@@ -24,15 +24,38 @@ type AuthResponse = {
   };
 };
 
+type FriendlyError = Error & { code?: string };
+
+function friendlyRegistrationError(error: unknown) {
+  const reason = error as FriendlyError;
+  switch (reason.code) {
+    case "EMAIL_ALREADY_REGISTERED":
+      return "هذا البريد مسجل من قبل. ادخل لحسابك بدل إنشاء حساب جديد.";
+    case "RATE_LIMITED":
+      return "طلبات كثيرة خلال وقت قصير. انتظر قليلاً ثم أعد المحاولة.";
+    case "REGISTRATION_UNAVAILABLE":
+    case "SESSION_INITIALIZATION_FAILED":
+      return "الخدمة مشغولة مؤقتاً. بياناتك لم تُرسل مرتين؛ أعد المحاولة بعد لحظات.";
+    case "REGISTRATION_FAILED":
+      return "تعذر إنشاء الحساب حالياً. حاول مرة أخرى، وإذا استمر المشكل تواصل مع الدعم.";
+    default:
+      return reason?.message || "فشل التسجيل. تحقق من البيانات وحاول مرة أخرى.";
+  }
+}
+
 export default function Register() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [password, setPassword] = useState("");
-  const strength = useMemo(
-    () => Math.min(100, password.length * 10),
-    [password],
-  );
+  const strength = useMemo(() => {
+    let score = Math.min(40, password.length * 4);
+    if (/[A-Z]/.test(password)) score += 15;
+    if (/[a-z]/.test(password)) score += 15;
+    if (/\d/.test(password)) score += 15;
+    if (/[^A-Za-z0-9]/.test(password)) score += 15;
+    return Math.min(100, score);
+  }, [password]);
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -53,7 +76,7 @@ export default function Register() {
         result.user.platformRole === "SUPER_ADMIN" ? "/admin/" : "/dashboard/",
       );
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "فشل التسجيل");
+      setError(friendlyRegistrationError(caught));
       setLoading(false);
     }
   }
@@ -78,42 +101,18 @@ export default function Register() {
             </p>
           </div>
 
-          <form
-            className="mt-8 grid gap-5 sm:grid-cols-2"
-            method="post"
-            onSubmit={submit}
-          >
+          <form className="mt-8 grid gap-5 sm:grid-cols-2" method="post" onSubmit={submit}>
             <label>
               <span className="label">اسمك الكامل</span>
-              <input
-                autoComplete="name"
-                autoFocus
-                className="field !py-3.5"
-                name="fullName"
-                placeholder="مثال: محمد أمين"
-                required
-              />
+              <input autoComplete="name" autoFocus className="field !py-3.5" name="fullName" placeholder="مثال: محمد أمين" required />
             </label>
             <label>
               <span className="label">اسم المتجر</span>
-              <input
-                className="field !py-3.5"
-                name="storeName"
-                placeholder="مثال: متجر الأناقة"
-                required
-              />
+              <input className="field !py-3.5" name="storeName" placeholder="مثال: متجر الأناقة" required />
             </label>
             <label className="sm:col-span-2">
               <span className="label">البريد الإلكتروني</span>
-              <input
-                autoComplete="email"
-                className="field !py-3.5"
-                dir="ltr"
-                name="email"
-                placeholder="name@example.com"
-                required
-                type="email"
-              />
+              <input autoComplete="email" className="field !py-3.5" dir="ltr" name="email" placeholder="name@example.com" required type="email" />
             </label>
             <label className="sm:col-span-2">
               <span className="label">كلمة السر</span>
@@ -125,102 +124,57 @@ export default function Register() {
                   minLength={10}
                   name="password"
                   onChange={(event) => setPassword(event.target.value)}
-                  placeholder="10 أحرف على الأقل"
+                  placeholder="10 أحرف أو أكثر"
                   required
                   type={showPassword ? "text" : "password"}
                   value={password}
                 />
-                <button
-                  aria-label={
-                    showPassword ? "إخفاء كلمة السر" : "إظهار كلمة السر"
-                  }
-                  className="absolute left-3 top-1/2 grid size-8 -translate-y-1/2 place-items-center rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-700"
-                  onClick={() => setShowPassword((value) => !value)}
-                  type="button"
-                >
+                <button aria-label={showPassword ? "إخفاء كلمة السر" : "إظهار كلمة السر"} className="absolute left-3 top-1/2 grid size-8 -translate-y-1/2 place-items-center rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-700" onClick={() => setShowPassword((value) => !value)} type="button">
                   {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
                 </button>
               </span>
               <span className="mt-2 block h-1.5 overflow-hidden rounded-full bg-slate-100">
-                <span
-                  className={`block h-full rounded-full transition-all ${strength >= 100 ? "bg-mint-500" : "bg-amber-400"}`}
-                  style={{ width: `${strength}%` }}
-                />
+                <span className={`block h-full rounded-full transition-all ${strength >= 80 ? "bg-mint-500" : "bg-amber-400"}`} style={{ width: `${strength}%` }} />
               </span>
               <span className="mt-1 block text-[10px] text-slate-400">
-                استعمل 10 أحرف أو أكثر لحماية حسابك.
+                ارفع قوتها بإضافة حروف كبيرة وأرقام ورموز.
               </span>
             </label>
 
             {error && (
-              <p
-                className="rounded-2xl border border-red-100 bg-red-50 p-4 text-sm font-bold text-red-700 sm:col-span-2"
-                role="alert"
-              >
-                {error}
-              </p>
+              <div className="rounded-2xl border border-red-100 bg-red-50 p-4 text-sm font-bold text-red-700 sm:col-span-2" role="alert">
+                <p>{error}</p>
+                <Link className="mt-2 inline-block text-red-900 underline" href="/login/">
+                  فتح صفحة تسجيل الدخول
+                </Link>
+              </div>
             )}
 
-            <button
-              className="btn-primary w-full !py-3.5 sm:col-span-2"
-              disabled={loading}
-              type="submit"
-            >
-              {loading ? (
-                <>
-                  <Loader2 className="animate-spin" size={18} /> جاري إنشاء
-                  الحساب…
-                </>
-              ) : (
-                <>
-                  إنشاء حسابي <ArrowLeft size={18} />
-                </>
-              )}
+            <button className="btn-primary w-full !py-3.5 sm:col-span-2" disabled={loading} type="submit">
+              {loading ? <><Loader2 className="animate-spin" size={18} /> جاري إنشاء الحساب…</> : <><span>إنشاء حسابي</span><ArrowLeft size={18} /></>}
             </button>
           </form>
 
           <p className="mt-6 text-center text-sm text-slate-500">
-            عندك حساب؟{" "}
-            <Link
-              className="font-black text-mint-700 hover:underline"
-              href="/login/"
-            >
-              ادخل من هنا
-            </Link>
+            عندك حساب؟ <Link className="font-black text-mint-700 hover:underline" href="/login/">ادخل من هنا</Link>
           </p>
           <p className="mt-7 flex items-center justify-center gap-2 text-[11px] text-slate-400">
-            <ShieldCheck size={14} /> بإنشاء الحساب أنت توافق على الاستخدام
-            العادل للمنصة
+            <ShieldCheck size={14} /> بياناتك محمية ولا نعرض كلمات السر داخل لوحة الإدارة.
           </p>
         </div>
       </section>
 
       <aside className="auth-aside relative hidden min-h-screen overflow-hidden p-12 text-white lg:flex lg:flex-col lg:justify-between">
         <div className="relative z-10 flex justify-end">
-          <span className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs font-bold text-white/55">
-            انطلق بخطوات واضحة
-          </span>
+          <span className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs font-bold text-white/55">منصة تجارة حقيقية، مش مجرد بوت</span>
         </div>
         <div className="relative z-10 max-w-xl">
-          <span className="grid size-14 place-items-center rounded-2xl bg-mint-500 shadow-xl shadow-mint-950/20">
-            <Store size={26} />
-          </span>
-          <h2 className="mt-7 text-5xl font-black leading-[1.25]">
-            كل أدوات متجرك، منظمة في مكان واحد.
-          </h2>
+          <span className="grid size-14 place-items-center rounded-2xl bg-mint-500 shadow-xl shadow-mint-950/20"><Store size={26} /></span>
+          <h2 className="mt-7 text-5xl font-black leading-[1.25]">كل أدوات متجرك، منظمة في مكان واحد.</h2>
           <div className="mt-8 space-y-3">
-            {[
-              "أضف منتجاتك وأسعار التوصيل",
-              "اربط Facebook وInstagram وWhatsApp",
-              "استقبل الطلبيات وتابع حالتها",
-            ].map((item, index) => (
-              <span
-                className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-bold text-white/70"
-                key={item}
-              >
-                <span className="grid size-7 place-items-center rounded-xl bg-white/10 text-[10px] text-mint-300">
-                  {index + 1}
-                </span>
+            {["أضف منتجاتك وأسعار التوصيل", "اربط Facebook وInstagram وWhatsApp", "استقبل الطلبيات وتابع حالتها"].map((item, index) => (
+              <span className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-bold text-white/70" key={item}>
+                <span className="grid size-7 place-items-center rounded-xl bg-white/10 text-[10px] text-mint-300">{index + 1}</span>
                 {item}
                 <Check className="mr-auto text-mint-300" size={16} />
               </span>
