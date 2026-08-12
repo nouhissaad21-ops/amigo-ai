@@ -33,44 +33,28 @@ const encryptionKey = z.string().superRefine((value, ctx) => {
   try {
     decoded = Buffer.from(value, "base64");
   } catch {
-    ctx.addIssue({
-      code: "custom",
-      message: "must be valid Base64",
-    });
+    ctx.addIssue({ code: "custom", message: "must be valid Base64" });
     return;
   }
 
   const normalizedInput = value.replace(/=+$/, "");
   const normalizedDecoded = decoded.toString("base64").replace(/=+$/, "");
-
   if (normalizedInput !== normalizedDecoded) {
-    ctx.addIssue({
-      code: "custom",
-      message: "must be valid Base64",
-    });
+    ctx.addIssue({ code: "custom", message: "must be valid Base64" });
     return;
   }
-
-  if (decoded.length !== 32) {
-    ctx.addIssue({
-      code: "custom",
-      message: "must decode to exactly 32 bytes",
-    });
-  }
+  if (decoded.length !== 32)
+    ctx.addIssue({ code: "custom", message: "must decode to exactly 32 bytes" });
 });
 
 const schema = z
   .object({
-    NODE_ENV: z
-      .enum(["development", "test", "production"])
-      .default("development"),
+    NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
     PORT: z.coerce.number().int().positive().default(4000),
     TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(5).default(1),
     WEB_ORIGIN: z.url().default("http://localhost:3000"),
     API_PUBLIC_URL: z.url().default("http://localhost:4000"),
-    LOG_LEVEL: z
-      .enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])
-      .default("info"),
+    LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
     DATABASE_URL: z.string().min(1),
     DATABASE_TENANT_URL: z.string().min(1),
     AMIGO_TENANT_PASSWORD: z.string().min(32).optional(),
@@ -88,7 +72,8 @@ const schema = z
     AI_TIMEOUT_MS: z.coerce.number().int().min(5000).max(180000).default(45000),
     GROQ_API_KEY: z.string().min(1).optional(),
     GROQ_BASE_URL: z.url().default("https://api.groq.com/openai/v1"),
-    GROQ_MODEL: z.string().default("llama-3.3-70b-versatile"),
+    GROQ_MODEL: z.string().default("qwen/qwen3.6-27b"),
+    GROQ_VISION_MODEL: z.string().default("qwen/qwen3.6-27b"),
     GROQ_TRANSCRIPTION_MODEL: z.string().default("whisper-large-v3-turbo"),
     XAI_API_KEY: z.string().min(1).optional(),
     XAI_BASE_URL: z.url().default("https://api.x.ai/v1"),
@@ -100,18 +85,12 @@ const schema = z
     INSTAGRAM_APP_ID: z.string().min(1).optional(),
     INSTAGRAM_APP_SECRET: z.string().min(1).optional(),
     META_VERIFY_TOKEN: z.string().min(16),
-    META_GRAPH_VERSION: z
-      .string()
-      .regex(/^v\d+\.\d+$/)
-      .default("v25.0"),
-    META_OAUTH_REDIRECT_URI: z
-      .url()
-      .default("http://localhost:4000/api/integrations/meta/callback"),
-    META_ENABLE_INSTAGRAM: bool,
+    META_GRAPH_VERSION: z.string().regex(/^v\d+\.\d+$/).default("v25.0"),
+    META_OAUTH_REDIRECT_URI: z.url().default("http://localhost:4000/api/integrations/meta/callback"),
+    META_ENABLE_INSTAGRAM: bool.default(true),
   })
   .superRefine((value, ctx) => {
-    const key =
-      value.AI_PROVIDER === "groq" ? value.GROQ_API_KEY : value.XAI_API_KEY;
+    const key = value.AI_PROVIDER === "groq" ? value.GROQ_API_KEY : value.XAI_API_KEY;
     if (!key)
       ctx.addIssue({
         code: "custom",
@@ -130,16 +109,11 @@ const schema = z
         path: [value.META_APP_ID ? "META_APP_SECRET" : "META_APP_ID"],
         message: "META_APP_ID and META_APP_SECRET must be configured together",
       });
-    if (
-      Boolean(value.INSTAGRAM_APP_ID) !== Boolean(value.INSTAGRAM_APP_SECRET)
-    )
+    if (Boolean(value.INSTAGRAM_APP_ID) !== Boolean(value.INSTAGRAM_APP_SECRET))
       ctx.addIssue({
         code: "custom",
-        path: [
-          value.INSTAGRAM_APP_ID ? "INSTAGRAM_APP_SECRET" : "INSTAGRAM_APP_ID",
-        ],
-        message:
-          "INSTAGRAM_APP_ID and INSTAGRAM_APP_SECRET must be configured together",
+        path: [value.INSTAGRAM_APP_ID ? "INSTAGRAM_APP_SECRET" : "INSTAGRAM_APP_ID"],
+        message: "INSTAGRAM_APP_ID and INSTAGRAM_APP_SECRET must be configured together",
       });
   });
 
