@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { Router } from "express";
 import argon2 from "argon2";
 import {
@@ -6,6 +7,7 @@ import {
   setAuthCookies,
   signAccessToken,
 } from "../auth.js";
+import { env } from "../config.js";
 import { systemDb } from "../db.js";
 import { AppError } from "../errors.js";
 import {
@@ -15,19 +17,24 @@ import {
 import { loginSchema, registerSchema } from "../schemas.js";
 import { redisRateLimit } from "../rate-limit.js";
 import { randomToken, sha256 } from "../security.js";
+import { logger } from "../logger.js";
+
 export const authRouter = Router();
+
 const limiter = redisRateLimit({
   prefix: "auth",
   windowMs: 900000,
   limit: 20,
   failClosed: true,
 });
+
 const passwordOptions = {
   type: argon2.argon2id,
   memoryCost: 65536,
   timeCost: 3,
   parallelism: 1,
 } as const;
+
 const slug = (v: string) =>
   `${
     v
@@ -37,6 +44,7 @@ const slug = (v: string) =>
       .replace(/\s+/g, "-")
       .toLowerCase() || "store"
   }-${crypto.randomUUID().slice(0, 6)}`;
+
 async function session(userId: string, storeId: string, req: any) {
   const t = randomToken();
   await systemDb.refreshSession.create({
@@ -51,56 +59,121 @@ async function session(userId: string, storeId: string, req: any) {
   });
   return t;
 }
+
+function mapRegistrationFailure(error: unknown): never {
+  if (error instanceof AppError) throw error;
+
+  const code =
+    typeof error === "object" && error && "code" in error
+      ? String((error as { code?: unknown }).code ?? "")
+      : "";
+
+  if (code === "P2002")
+    throw new AppError(
+      409,
+      "EMAIL_ALREADY_REGISTERED",
+      "هذا البريد الإلكتروني مسجل من قبل. استعمل تسجيل الدخول.",
+    );
+
+  if (["P1000", "P1001", "P1002", "P2021", "P2022"].includes(code))
+    throw new AppError(
+      503,
+      "REGISTRATION_UNAVAILABLE",
+      "خدمة إنشاء الحساب غير متاحة مؤقتاً. أعد المحاولة بعد لحظات.",
+    );
+
+  logger.error({ err: error }, "Registration transaction failed");
+  throw new AppError(
+    500,
+    "REGISTRATION_FAILED",
+    "تعذر إنشاء الحساب حالياً. حاول مرة أخرى.",
+  );
+}
+
 authRouter.post("/register", limiter, async (req, res) => {
   const input = registerSchema.parse(req.body);
-  const passwordHash = await argon2.hash(input.password, passwordOptions);
-  const result = await systemDb.$transaction(async (tx) => {
-    const platformRole = await initialPlatformRole(tx);
-    const user = await tx.user.create({
-      data: {
-        email: input.email,
-        fullName: input.fullName,
-        passwordHash,
-        platformRole,
-      },
-    });
-    const store = await tx.store.create({
-      data: { name: input.storeName, slug: slug(input.storeName) },
-    });
-    const membership = await tx.storeMembership.create({
-      data: { storeId: store.id, userId: user.id, role: "OWNER" },
-    });
-    await tx.subscription.create({
-      data: {
-        storeId: store.id,
-        currentPeriodEnd: new Date(Date.now() + 1209600000),
-      },
-    });
-    await tx.merchantRules.create({
-      data: { storeId: store.id, generalRules: "" },
-    });
-    return { user, store, membership };
-  });
 
-  const [access, refresh] = await Promise.all([
-    signAccessToken({
-      userId: result.user.id,
-      storeId: result.store.id,
-      role: result.membership.role,
-    }),
-    session(result.user.id, result.store.id, req),
-  ]);
-  setAuthCookies(res, access, refresh);
-  res.status(201).json({
-    user: {
-      id: result.user.id,
-      email: result.user.email,
-      fullName: result.user.fullName,
-      platformRole: result.user.platformRole,
-    },
-    store: result.store,
+  const existing = await systemDb.user.findUnique({
+    where: { email: input.email },
+    select: { id: true },
   });
+  if (existing)
+    throw new AppError(
+      409,
+      "EMAIL_ALREADY_REGISTERED",
+      "هذا البريد الإلكتروني مسجل من قبل. استعمل تسجيل الدخول.",
+    );
+
+  const passwordHash = await argon2.hash(input.password, passwordOptions);
+
+  let result;
+  try {
+    result = await systemDb.$transaction(
+      async (tx) => {
+        const platformRole = await initialPlatformRole(tx, input.email);
+        const user = await tx.user.create({
+          data: {
+            email: input.email,
+            fullName: input.fullName,
+            passwordHash,
+            platformRole,
+          },
+        });
+        const store = await tx.store.create({
+          data: { name: input.storeName, slug: slug(input.storeName) },
+        });
+        const membership = await tx.storeMembership.create({
+          data: { storeId: store.id, userId: user.id, role: "OWNER" },
+        });
+        await tx.subscription.create({
+          data: {
+            storeId: store.id,
+            currentPeriodEnd: new Date(Date.now() + 1209600000),
+          },
+        });
+        await tx.merchantRules.create({
+          data: { storeId: store.id, generalRules: "" },
+        });
+        return { user, store, membership };
+      },
+      { maxWait: 10000, timeout: 20000 },
+    );
+  } catch (error) {
+    mapRegistrationFailure(error);
+  }
+
+  try {
+    const [access, refresh] = await Promise.all([
+      signAccessToken({
+        userId: result.user.id,
+        storeId: result.store.id,
+        role: result.membership.role,
+      }),
+      session(result.user.id, result.store.id, req),
+    ]);
+    setAuthCookies(res, access, refresh);
+    res.status(201).json({
+      user: {
+        id: result.user.id,
+        email: result.user.email,
+        fullName: result.user.fullName,
+        platformRole: result.user.platformRole,
+      },
+      store: result.store,
+    });
+  } catch (error) {
+    logger.error(
+      { err: error, userId: result.user.id, storeId: result.store.id },
+      "Registration session creation failed",
+    );
+    throw new AppError(
+      503,
+      "SESSION_INITIALIZATION_FAILED",
+      "تم إنشاء الحساب لكن تعذر فتح الجلسة. أعد تسجيل الدخول.",
+    );
+  }
 });
+
 authRouter.post("/login", limiter, async (req, res) => {
   const input = loginSchema.parse(req.body);
   const user = await systemDb.user.findUnique({
@@ -148,6 +221,7 @@ authRouter.post("/login", limiter, async (req, res) => {
     store: membership.store,
   });
 });
+
 authRouter.post("/refresh", limiter, async (req, res) => {
   const t = req.cookies?.amigo_refresh as string | undefined;
   if (!t) throw new AppError(401, "NO_REFRESH_TOKEN", "الجلسة منتهية");
@@ -204,6 +278,7 @@ authRouter.post("/refresh", limiter, async (req, res) => {
   );
   res.json({ ok: true });
 });
+
 authRouter.post("/logout", async (req, res) => {
   const t = req.cookies?.amigo_refresh as string | undefined;
   if (t)
@@ -214,6 +289,7 @@ authRouter.post("/logout", async (req, res) => {
   clearAuthCookies(res);
   res.status(204).end();
 });
+
 authRouter.get("/me", authenticate, async (req, res) => {
   const a = req.auth!,
     [user, store, subscription] = await Promise.all([
@@ -224,5 +300,5 @@ authRouter.get("/me", authenticate, async (req, res) => {
       systemDb.store.findUniqueOrThrow({ where: { id: a.storeId } }),
       systemDb.subscription.findUnique({ where: { storeId: a.storeId } }),
     ]);
-  res.json({ user, store, subscription, role: a.role });
+  res.json({ user, store, subscription, role: a.role, isPlatformAdmin: user.platformRole === "SUPER_ADMIN", apiVersion: "v1" });
 });
