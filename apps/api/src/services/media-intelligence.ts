@@ -15,6 +15,7 @@ type TranscriptionResponse = {
 };
 
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 
 function channelToken(channel: Channel) {
   try {
@@ -38,16 +39,70 @@ function audioFilename(contentType: string) {
   return "voice.ogg";
 }
 
-export function audioAttachmentUrl(event: any) {
+function attachment(event: any, types: string[]) {
   const message = event?.message ?? event;
   const attachments = Array.isArray(message?.attachments)
     ? message.attachments
     : [];
-  const audio = attachments.find((attachment: any) =>
-    ["audio", "voice"].includes(String(attachment?.type ?? "").toLowerCase()),
+  return attachments.find((item: any) =>
+    types.includes(String(item?.type ?? "").toLowerCase()),
   );
+}
+
+export function audioAttachmentUrl(event: any) {
+  const audio = attachment(event, ["audio", "voice"]);
   const url = audio?.payload?.url ?? audio?.url;
   return typeof url === "string" && /^https:\/\//i.test(url) ? url : undefined;
+}
+
+export function imageAttachmentUrl(event: any) {
+  const image = attachment(event, ["image", "photo", "picture"]);
+  const url = image?.payload?.url ?? image?.url;
+  return typeof url === "string" && /^https:\/\//i.test(url) ? url : undefined;
+}
+
+async function downloadMedia(
+  channel: Channel,
+  url: string,
+  maxBytes: number,
+): Promise<{ bytes: Uint8Array; contentType: string }> {
+  const token = channelToken(channel);
+  const response = await fetch(url, {
+    headers: token ? { authorization: `Bearer ${token}` } : undefined,
+    redirect: "follow",
+    signal: AbortSignal.timeout(12_000),
+  });
+  if (!response.ok) throw new Error(`media HTTP ${response.status}`);
+
+  const contentLength = Number(response.headers.get("content-length") ?? 0);
+  if (contentLength > maxBytes) throw new Error("media exceeds size limit");
+
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (!bytes.byteLength || bytes.byteLength > maxBytes)
+    throw new Error("media size is invalid");
+
+  return {
+    bytes,
+    contentType:
+      response.headers.get("content-type")?.split(";")[0] ?? "application/octet-stream",
+  };
+}
+
+export async function imageAttachmentDataUrl(
+  channel: Channel,
+  url: string,
+): Promise<string | undefined> {
+  try {
+    const media = await downloadMedia(channel, url, MAX_IMAGE_BYTES);
+    if (!media.contentType.startsWith("image/")) return undefined;
+    return `data:${media.contentType};base64,${Buffer.from(media.bytes).toString("base64")}`;
+  } catch (error) {
+    logger.warn(
+      { err: error, channelId: channel.id },
+      "Customer image download failed",
+    );
+    return undefined;
+  }
 }
 
 export async function transcribeMetaVoice(
@@ -57,30 +112,12 @@ export async function transcribeMetaVoice(
   if (!env.GROQ_API_KEY) return undefined;
 
   try {
-    const token = channelToken(channel);
-    const mediaResponse = await fetch(url, {
-      headers: token ? { authorization: `Bearer ${token}` } : undefined,
-      redirect: "follow",
-      signal: AbortSignal.timeout(12_000),
-    });
-    if (!mediaResponse.ok)
-      throw new Error(`media HTTP ${mediaResponse.status}`);
-
-    const contentLength = Number(mediaResponse.headers.get("content-length") ?? 0);
-    if (contentLength > MAX_AUDIO_BYTES)
-      throw new Error("voice note exceeds 25 MB");
-
-    const bytes = await mediaResponse.arrayBuffer();
-    if (!bytes.byteLength || bytes.byteLength > MAX_AUDIO_BYTES)
-      throw new Error("voice note size is invalid");
-
-    const contentType =
-      mediaResponse.headers.get("content-type")?.split(";")[0] ?? "audio/ogg";
+    const media = await downloadMedia(channel, url, MAX_AUDIO_BYTES);
     const form = new FormData();
     form.set(
       "file",
-      new Blob([new Uint8Array(bytes)], { type: contentType }),
-      audioFilename(contentType),
+      new Blob([media.bytes], { type: media.contentType }),
+      audioFilename(media.contentType),
     );
     form.set("model", env.GROQ_TRANSCRIPTION_MODEL);
     form.set("response_format", "json");
