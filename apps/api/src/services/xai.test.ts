@@ -68,7 +68,7 @@ describe("multilingual Chat Completions merchant agent", () => {
     expect(url).toBe("https://api.groq.com/openai/v1/chat/completions");
     const body = JSON.parse(String(request.body));
     expect(body).toMatchObject({
-      model: "llama-3.3-70b-versatile",
+      model: "qwen/qwen3.6-27b",
       tool_choice: "auto",
       parallel_tool_calls: false,
     });
