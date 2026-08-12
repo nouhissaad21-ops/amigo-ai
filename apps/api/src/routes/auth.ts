@@ -60,13 +60,16 @@ async function session(userId: string, storeId: string, req: any) {
   return t;
 }
 
+function prismaCode(error: unknown) {
+  return typeof error === "object" && error && "code" in error
+    ? String((error as { code?: unknown }).code ?? "")
+    : "";
+}
+
 function mapRegistrationFailure(error: unknown): never {
   if (error instanceof AppError) throw error;
 
-  const code =
-    typeof error === "object" && error && "code" in error
-      ? String((error as { code?: unknown }).code ?? "")
-      : "";
+  const code = prismaCode(error);
 
   if (code === "P2002")
     throw new AppError(
@@ -79,7 +82,14 @@ function mapRegistrationFailure(error: unknown): never {
     throw new AppError(
       503,
       "REGISTRATION_UNAVAILABLE",
-      "خدمة إنشاء الحساب غير متاحة مؤقتاً. أعد المحاولة بعد لحظات.",
+      "قاعدة البيانات غير جاهزة حالياً. أعد المحاولة بعد لحظات.",
+    );
+
+  if (["P2024", "P2034"].includes(code))
+    throw new AppError(
+      503,
+      "REGISTRATION_BUSY",
+      "الخادم مشغول حالياً بتهيئة البيانات. أعد المحاولة بعد لحظات.",
     );
 
   logger.error({ err: error }, "Registration transaction failed");
@@ -93,18 +103,35 @@ function mapRegistrationFailure(error: unknown): never {
 authRouter.post("/register", limiter, async (req, res) => {
   const input = registerSchema.parse(req.body);
 
-  const existing = await systemDb.user.findUnique({
-    where: { email: input.email },
-    select: { id: true },
-  });
-  if (existing)
-    throw new AppError(
-      409,
-      "EMAIL_ALREADY_REGISTERED",
-      "هذا البريد الإلكتروني مسجل من قبل. استعمل تسجيل الدخول.",
-    );
+  // Keep database failures from leaking as a generic 500. This check is
+  // intentionally outside the transaction because it gives the customer a
+  // deterministic "use login" response before doing expensive Argon2 work.
+  try {
+    const existing = await systemDb.user.findUnique({
+      where: { email: input.email },
+      select: { id: true },
+    });
+    if (existing)
+      throw new AppError(
+        409,
+        "EMAIL_ALREADY_REGISTERED",
+        "هذا البريد الإلكتروني مسجل من قبل. استعمل تسجيل الدخول.",
+      );
+  } catch (error) {
+    mapRegistrationFailure(error);
+  }
 
-  const passwordHash = await argon2.hash(input.password, passwordOptions);
+  let passwordHash: string;
+  try {
+    passwordHash = await argon2.hash(input.password, passwordOptions);
+  } catch (error) {
+    logger.error({ err: error }, "Password hashing failed during registration");
+    throw new AppError(
+      503,
+      "REGISTRATION_BUSY",
+      "الخادم مشغول حالياً. أعد المحاولة بعد لحظات.",
+    );
+  }
 
   let result;
   try {
@@ -136,21 +163,45 @@ authRouter.post("/register", limiter, async (req, res) => {
         });
         return { user, store, membership };
       },
-      { maxWait: 10000, timeout: 20000 },
+      { maxWait: 30000, timeout: 60000 },
     );
   } catch (error) {
     mapRegistrationFailure(error);
   }
 
   try {
-    const [access, refresh] = await Promise.all([
-      signAccessToken({
-        userId: result.user.id,
-        storeId: result.store.id,
-        role: result.membership.role,
-      }),
-      session(result.user.id, result.store.id, req),
-    ]);
+    const access = await signAccessToken({
+      userId: result.user.id,
+      storeId: result.store.id,
+      role: result.membership.role,
+    });
+
+    // Refresh-session creation is retried once because managed/free Postgres
+    // instances can briefly wake from an idle state. The account itself is
+    // already committed atomically at this point.
+    let refresh: string | undefined;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 2 && !refresh; attempt += 1) {
+      try {
+        refresh = await session(result.user.id, result.store.id, req);
+      } catch (error) {
+        lastError = error;
+        if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 350));
+      }
+    }
+
+    if (!refresh) {
+      logger.error(
+        { err: lastError, userId: result.user.id, storeId: result.store.id },
+        "Registration refresh session creation failed",
+      );
+      throw new AppError(
+        503,
+        "SESSION_INITIALIZATION_FAILED",
+        "تم إنشاء الحساب بنجاح، لكن تعذر فتح الجلسة تلقائياً. ادخل من صفحة تسجيل الدخول.",
+      );
+    }
+
     setAuthCookies(res, access, refresh);
     res.status(201).json({
       user: {
@@ -162,6 +213,7 @@ authRouter.post("/register", limiter, async (req, res) => {
       store: result.store,
     });
   } catch (error) {
+    if (error instanceof AppError) throw error;
     logger.error(
       { err: error, userId: result.user.id, storeId: result.store.id },
       "Registration session creation failed",
@@ -169,7 +221,7 @@ authRouter.post("/register", limiter, async (req, res) => {
     throw new AppError(
       503,
       "SESSION_INITIALIZATION_FAILED",
-      "تم إنشاء الحساب لكن تعذر فتح الجلسة. أعد تسجيل الدخول.",
+      "تم إنشاء الحساب بنجاح، لكن تعذر فتح الجلسة تلقائياً. ادخل من صفحة تسجيل الدخول.",
     );
   }
 });
