@@ -62,16 +62,18 @@ services:
       - key: GROQ_BASE_URL
         value: https://api.groq.com/openai/v1
       - key: GROQ_MODEL
-        value: llama-3.3-70b-versatile
+        value: qwen/qwen3.6-27b
+      - key: GROQ_VISION_MODEL
+        value: qwen/qwen3.6-27b
+      - key: GROQ_TRANSCRIPTION_MODEL
+        value: whisper-large-v3-turbo
       - key: XAI_STORE_RESPONSES
         value: false
       - key: META_APP_ID
         sync: false
       - key: META_APP_SECRET
         sync: false
-      - key: INSTAGRAM_APP_ID
-        sync: false
-      - key: INSTAGRAM_APP_SECRET
+      - key: META_LOGIN_CONFIG_ID
         sync: false
       - key: META_VERIFY_TOKEN
         generateValue: true
@@ -79,6 +81,10 @@ services:
         value: v25.0
       - key: META_ENABLE_INSTAGRAM
         value: true
+      - key: INSTAGRAM_APP_ID
+        sync: false
+      - key: INSTAGRAM_APP_SECRET
+        sync: false
 
 databases:
   - name: amigo-ai-db
